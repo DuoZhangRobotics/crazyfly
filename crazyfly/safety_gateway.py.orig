@@ -255,12 +255,12 @@ class SafetyGateway(Node):
             self._issue_emergency("; ".join(self.last_evaluation.reasons))
         if (
             self.machine.state == SafetyState.LANDING
-            and self._landing_disarm_at is not None
-            and now >= self._landing_disarm_at
+            and self._landing_started_at is not None
+            and now - self._landing_started_at >= 1.25
         ):
             self._send_arm(False)
             self.machine.disable()
-            self._landing_disarm_at = None
+            self._landing_started_at = None
         self._publish_health()
 
     def _issue_land(self, reason: str) -> None:
@@ -273,10 +273,9 @@ class SafetyGateway(Node):
         for name in self.robot_names:
             self._forward(name, "land", request)
         self.machine.mark_landing()
-        self._landing_disarm_at = self._now() + 1.25
+        self._landing_started_at = self._now()
 
     def _issue_emergency(self, reason: str) -> None:
-        self._landing_disarm_at = None
         if self.machine.state != SafetyState.EMERGENCY:
             self.machine.mark_emergency()
         self.get_logger().fatal(f"EMERGENCY STOP: {reason}")
