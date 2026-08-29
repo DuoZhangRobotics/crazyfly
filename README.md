@@ -187,12 +187,16 @@ ros2 launch crazyfly swarm.launch.py \
   allow_hardware:=true \
   fleet_config_file:=/absolute/path/to/config/local/crazyflies.yaml \
   safety_config_file:=/absolute/path/to/config/local/safety.yaml \
-  motion_capture_yaml_file:=/absolute/path/to/config/local/motion_capture.yaml
+  motion_capture_yaml_file:=/absolute/path/to/config/local/motion_capture.yaml \
+  server_config_file:=/absolute/path/to/config/server.yaml
 ```
 
-Do not run this yet. Radio USB permissions, current Crazyflie firmware, unique
-radio addresses, single-marker identity, and a propellers-off
-single-aircraft check still need physical validation.
+A stationary one-aircraft launch has been validated with live OptiTrack and radio
+telemetry. No enable, takeoff, or motor command was sent. Keep the local safety
+file at `flight_enabled: false` between approved tests. The project server
+configuration accepts mocap arrival rates from 80-180 Hz to accommodate the
+nominal 120 Hz stream. Before the first flight, repeat preflight and use a clear
+controlled volume with a dedicated emergency-stop operator.
 
 ## Experiment logging
 

@@ -4,6 +4,8 @@ from crazyfly.config import load_safety
 from crazyfly.safety import (
     CAN_BE_ARMED,
     CAN_FLY,
+    IS_ARMED,
+    IS_CRASHED,
     IS_TUMBLED,
     SafetyAction,
     SafetyMachine,
@@ -46,6 +48,21 @@ def test_preflight_requires_a_stable_recovery_interval() -> None:
 
     assert not success
     assert "healthy recovery interval has not completed" in reasons
+
+
+def test_preflight_accepts_an_already_armed_auto_arm_crazyflie() -> None:
+    machine = SafetyMachine(load_safety(ROOT / "config" / "mock_safety.yaml"), ("cf1",))
+    supervisor_info = IS_ARMED | CAN_FLY
+    machine.record_pose("cf1", (0.0, 0.0, 0.3), 0.0)
+    machine.record_status("cf1", 4.1, supervisor_info, 0.0)
+    machine.evaluate(0.0)
+    machine.record_pose("cf1", (0.0, 0.0, 0.3), 1.01)
+    machine.record_status("cf1", 4.1, supervisor_info, 1.01)
+    machine.evaluate(1.01)
+
+    success, reasons = machine.preflight(1.01)
+
+    assert success, reasons
 
 
 def test_tracking_loss_rejects_then_lands_then_emergency_stops() -> None:
@@ -142,6 +159,17 @@ def test_tumble_is_an_immediate_hard_stop() -> None:
     machine = _ready_machine()
     machine.mark_flying()
     machine.record_status("cf1", 4.1, SUPERVISOR_READY | IS_TUMBLED, 1.02)
+
+    result = machine.evaluate(1.02)
+
+    assert result.action is SafetyAction.EMERGENCY
+    assert result.state is SafetyState.EMERGENCY
+
+
+def test_crash_is_an_immediate_hard_stop() -> None:
+    machine = _ready_machine()
+    machine.mark_flying()
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY | IS_CRASHED, 1.02)
 
     result = machine.evaluate(1.02)
 

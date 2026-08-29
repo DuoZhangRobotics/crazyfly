@@ -3,7 +3,7 @@
     warnings:
       frequency: 1.0
       motion_capture:
-        warning_if_rate_outside: [80.0, 120.0]
+        warning_if_rate_outside: [80.0, 180.0]
       communication:
         max_unicast_latency: 10.0
         min_unicast_ack_rate: 0.9

@@ -6,6 +6,7 @@ import yaml
 
 from crazyfly.config import ConfigError, load_fleet, load_safety
 from crazyfly.config_validator import (
+    load_server_parameters,
     prepare_motion_capture_parameters,
     validate,
     validate_hardware_configuration,
@@ -35,6 +36,26 @@ def test_mock_configuration_is_explicitly_bounded() -> None:
     assert safety.flight_enabled
     assert safety.geofence_min == (-2.0, -2.0, 0.0)
     assert safety.geofence_max == (2.0, 2.0, 1.0)
+
+
+def test_server_warning_range_accepts_nominal_120_hz_mocap() -> None:
+    parameters = load_server_parameters(str(ROOT / "config" / "server.yaml"))
+
+    assert parameters["warnings"]["motion_capture"][
+        "warning_if_rate_outside"
+    ] == [80.0, 180.0]
+
+
+def test_invalid_server_warning_range_is_rejected(tmp_path: Path) -> None:
+    server = yaml.safe_load((ROOT / "config" / "server.yaml").read_text())
+    server["/crazyflie_server"]["ros__parameters"]["warnings"]["motion_capture"][
+        "warning_if_rate_outside"
+    ] = [180.0, 80.0]
+    path = tmp_path / "server.yaml"
+    path.write_text(yaml.safe_dump(server))
+
+    with pytest.raises(ConfigError, match="positive and increasing"):
+        load_server_parameters(str(path))
 
 
 def test_real_motive_address_is_required_for_hardware() -> None:

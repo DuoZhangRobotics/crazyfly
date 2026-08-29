@@ -120,6 +120,45 @@ def prepare_motion_capture_parameters(
     return parameters
 
 
+def load_server_parameters(path: str) -> dict[str, Any]:
+    """Load project-owned Crazyswarm2 server parameters and validate warnings."""
+    server = load_yaml(path)
+    node = server.get("/crazyflie_server")
+    if not isinstance(node, Mapping):
+        raise ConfigError("server configuration must define /crazyflie_server")
+    parameters = node.get("ros__parameters")
+    if not isinstance(parameters, dict):
+        raise ConfigError("server configuration must define ros__parameters")
+
+    warnings = parameters.get("warnings")
+    motion_capture = (
+        warnings.get("motion_capture") if isinstance(warnings, Mapping) else None
+    )
+    rate_range = (
+        motion_capture.get("warning_if_rate_outside")
+        if isinstance(motion_capture, Mapping)
+        else None
+    )
+    if not isinstance(rate_range, list) or len(rate_range) != 2:
+        raise ConfigError("server motion-capture warning range must contain two rates")
+    try:
+        minimum_rate, maximum_rate = (float(value) for value in rate_range)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "server motion-capture warning rates must be finite numbers"
+        ) from exc
+    if (
+        not isfinite(minimum_rate)
+        or not isfinite(maximum_rate)
+        or minimum_rate <= 0
+        or maximum_rate <= minimum_rate
+    ):
+        raise ConfigError(
+            "server motion-capture warning rates must be positive and increasing"
+        )
+    return deepcopy(parameters)
+
+
 def validate(
     fleet_path: str,
     safety_path: str,

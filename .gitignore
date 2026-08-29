@@ -212,6 +212,10 @@ install/
 config/local/
 experiments/
 
+# Crazyswarm2 firmware table-of-contents caches (CRC in filename)
+/log*.csv
+/params*.csv
+
 # PyPI configuration file
 .pypirc
 

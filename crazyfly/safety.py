@@ -16,6 +16,7 @@ CAN_FLY = 8
 IS_FLYING = 16
 IS_TUMBLED = 32
 IS_LOCKED = 64
+IS_CRASHED = 128
 
 
 class SafetyState(str, Enum):
@@ -145,6 +146,7 @@ class SafetyMachine:
                 (
                     "tumbled",
                     "locked",
+                    "crashed",
                     "cannot fly",
                     "invalid position",
                     "hard geofence",
@@ -343,7 +345,9 @@ class SafetyMachine:
                 reasons.append(f"tumbled: {name}")
             if item.supervisor_info & IS_LOCKED:
                 reasons.append(f"locked: {name}")
-            if preflight and not item.supervisor_info & CAN_BE_ARMED:
+            if item.supervisor_info & IS_CRASHED:
+                reasons.append(f"crashed: {name}")
+            if preflight and not item.supervisor_info & (CAN_BE_ARMED | IS_ARMED):
                 reasons.append(f"cannot be armed: {name}")
             if not item.supervisor_info & CAN_FLY:
                 reasons.append(f"cannot fly: {name}")

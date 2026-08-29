@@ -1,19 +1,17 @@
 # Crazyflie + OptiTrack Swarm: Status and Next Plan
 
-Last updated: 2026-08-28  
+Last updated: 2026-08-29
 Repository: <https://github.com/DuoZhangRobotics/crazyfly>  
 Target: five or more Crazyflie 2.x vehicles using OptiTrack feedback and
 Crazyswarm2 on ROS 2 Jazzy.
 
 ## 1. Current outcome
 
-The phone/no-sudo development phase is implemented. The repository is now an
-`ament_python` ROS 2 package with a mandatory project safety gateway, isolated
-mock environment, fail-closed physical launch, configuration and trajectory
-validation, and bounded experiment logging.
-
-Nothing physical was armed or flown. A Crazyradio is not currently visible on
-this Ubuntu machine.
+The repository safety and development foundation is implemented. The first
+stationary physical Crazyswarm2 launch has now passed with one Crazyflie, the
+Crazyradio PA, and live single-marker OptiTrack feedback. The safety gateway
+reached `READY`, while `operator_enabled` and `commands_allowed` remained false.
+No enable, takeoff, or motor command was sent, and nothing was flown.
 
 ## 2. Installed environment
 
@@ -63,7 +61,7 @@ Tracking-loss behavior is staged:
 2. At 0.25 s, request a controlled landing.
 3. At 1.00 s, invoke the upstream emergency stop.
 
-Tumble, supervisor lock, hard geofence breach, and live separation violation
+Tumble, crash, supervisor lock, hard geofence breach, and live separation violation
 invoke the emergency stop immediately.
 
 Public project interfaces:
@@ -105,7 +103,7 @@ Public project interfaces:
 The following passed on this machine:
 
 - Python compilation for application, launch, and test modules.
-- 29 automated tests covering safe defaults, invalid configurations, Motive
+- 33 automated tests covering safe defaults, invalid configurations, Motive
   placeholders, duplicate radios, recovery time, battery, tumble, command
   limits, geofence, separation, trajectories, and architecture boundaries.
 - Clean `colcon` build in an isolated workspace.
@@ -114,14 +112,24 @@ The following passed on this machine:
 - Live mock takeoff to 0.30 m over two seconds.
 - Simulated tracking loss: controlled-land request at 0.25 s and emergency stop
   at 1.00 s.
-- The physical launch with committed files fails before upstream hardware nodes
-  start.
-- Wired multicast NatNet reception from Motive 2.0 at `172.16.90.213` is stable
-  at approximately 120 Hz; Motive reports NatNet 3.0.
-- The latest live check produced an empty unlabeled point cloud and no `/poses`.
-  A visible free marker is the remaining physical prerequisite for assignment.
-- The mocap-only launch now loads an enabled local fleet and generates named
-  single-marker tracker entries without starting Crazyswarm2 or a radio server.
+- Fail-closed launch behavior remains intact with committed files and with the
+  ignored local safety file restored to `flight_enabled: false`.
+- Motive 2.0 at `172.16.90.213` publishes NatNet 3.0 over wired multicast. The
+  single marker is assigned to `cf1`, axes are correct, and static noise is below
+  0.02 mm per axis at approximately 120 Hz.
+- A brief 42 ms marker dropout recovered. An occlusion longer than about 1.1 s
+  required restarting the tracker; automatic reacquisition remains a known
+  single-marker limitation.
+- Crazyflie firmware 2026.08 (`54f31e243a0b`, CLEAN) and the 2M radio URI were
+  validated. A 30-second radio test and a motor-free estimator injection test
+  passed; the settled position error was approximately 2.5 mm or less per axis.
+- The stationary full stack connected with battery 3.77 V, live pose and status,
+  and supervisor flags `526`. Read-only preflight passed after correcting the
+  auto-arm compatibility check; the command gate remained disabled.
+- The project-owned Crazyswarm2 server configuration accepts 80-180 Hz, covering
+  the nominal 120 Hz stream and measured network-arrival jitter.
+- `motion_capture_tracking` still exits with a Boost interrupted-system-call
+  error on Ctrl+C, after the other nodes shut down cleanly.
 
 ## 5. Selected physical architecture
 
@@ -149,18 +157,19 @@ not move the flight stack into WSL or a virtual machine.
 
 ## 6. Physical information still required
 
-Confirmed network: Motive 2.0/NatNet 3.0 is `172.16.90.213`; Ubuntu is
-`172.16.90.195/27`; wired multicast is working. Still required:
+Confirmed for `cf1`: Motive and Ubuntu addressing, wired multicast, Z-up frame,
+measured geofence, marker assignment, initial position, current firmware, 2M
+radio URI, Crazyradio visibility, battery telemetry, and stationary estimator
+convergence.
 
-- Measured flight-volume minimum and maximum in the Motive world frame.
-- Final marker mount offset and measured initial position for each vehicle.
-- Physical label, radio URI, firmware, and battery ID for each vehicle.
-- Crazyradio PA firmware version and USB visibility after udev setup.
+Still required before scaling beyond one aircraft:
 
-Previously tested aircraft reported CRTP protocol version 4, so firmware must be
-reviewed before Crazyswarm2 flight. One battery showed severe voltage sag and
-must remain quarantined. A previous open-loop hop reached the ceiling; those
-legacy scripts are not acceptable production tests.
+- Label, unique radio URI, marker mount, measured initial position, firmware, and
+  battery inventory for each additional vehicle.
+- A repeatable procedure for restarting single-marker tracking after a long
+  occlusion.
+- Battery validation under controlled load; resting voltage alone is not enough.
+- UR5e-to-Motive frame calibration before coordinated robot-drone work.
 
 ## 7. Next physical bring-up plan
 
@@ -171,40 +180,28 @@ Bitcraze udev rule, uv environment, permanent workspace build, and automated
 tests are installed. Free additional disk space before any broad OS upgrade or
 optional simulator build.
 
-### Stage B: OptiTrack only, motors disconnected
+### Stage B: OptiTrack-only validation completed
 
-1. Create ignored local motion-capture configuration with the real Motive IP.
-2. Enable NatNet streaming on the correct Windows Ethernet interface.
-3. Remove or disable unrelated Motive assets and stream unlabeled markers.
-4. Launch only `mocap_only.launch.py` with a local fleet file containing measured
-   initial marker positions.
-5. Confirm `/poses` rate, identity, world axes, position, and dropout timing.
-6. Move each marker by hand and verify there are no swaps. Single-marker tracking
-   intentionally provides no external orientation.
+The wired NatNet stream, Z-up world frame, geofence, single-marker assignment,
+identity, rate, static noise, hand motion, and dropout behavior were measured. No
+Crazyflie server ran during the isolated motion-capture tests. Long occlusion
+reacquisition remains procedural: restart the tracker after restoring visibility.
 
-Acceptance: stable 80-120 Hz data and correct `cf1`-`cf5` identity with no
-Crazyflie server running.
+### Stage C: one stationary aircraft completed
 
-### Stage C: one aircraft, propellers removed
-
-1. Inventory and label one test Crazyflie and battery.
-2. Update firmware through the official procedure if required.
-3. Assign a unique 2M URI and update only the ignored local fleet file.
-4. Connect through Crazyswarm2 and check battery, supervisor, link quality, and
-   emergency service.
-5. Compare OptiTrack pose with the onboard estimate while moving it by hand.
-6. Test tracking dropout and gateway command rejection without propellers.
-
-Acceptance: one correctly identified aircraft, current firmware, healthy
-battery, stable link, matching pose, and verified stop path.
+The firmware, 2M radio, telemetry, external-position injection, estimator
+convergence, full ROS stack, and fail-closed safety gateway were validated on
+`cf1`. Props remained installed, so no motor, enable, takeoff, land, or emergency
+command was issued. Read-only preflight passed and the command gate stayed off.
 
 ### Stage D: one controlled flight
 
-1. Measure and review the local geofence.
-2. Use one vehicle, low speed, 0.30 m takeoff, and a clear netted volume.
-3. Assign a dedicated physical emergency-stop operator.
-4. Pass takeoff/hover/short `go_to`/land before testing fault behavior.
-5. Review logs and battery sag after every run.
+1. Verify the 80-180 Hz diagnostic range clears the mocap-rate warning.
+2. Use a fully charged, validated battery and repeat stationary preflight.
+3. Use one vehicle, low speed, 0.30 m takeoff, and a clear netted volume.
+4. Assign a dedicated physical emergency-stop operator.
+5. Pass takeoff/hover/short `go_to`/land before testing fault behavior.
+6. Review logs and battery sag after every run.
 
 ### Stage E: scale to five
 
