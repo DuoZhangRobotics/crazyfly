@@ -1,0 +1,22 @@
+version: 1
+steps:
+  - duration_s: 2.0
+    goals:
+      cf1:
+        position: [0.2, 0.0, 0.3]
+        yaw_deg: 0.0
+  - duration_s: 2.0
+    goals:
+      cf1:
+        position: [0.2, 0.2, 0.3]
+        yaw_deg: 0.0
+  - duration_s: 2.0
+    goals:
+      cf1:
+        position: [0.0, 0.2, 0.3]
+        yaw_deg: 0.0
+  - duration_s: 2.0
+    goals:
+      cf1:
+        position: [0.0, 0.0, 0.3]
+        yaw_deg: 0.0

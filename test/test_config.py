@@ -1,0 +1,162 @@
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+import yaml
+
+from crazyfly.config import ConfigError, load_fleet, load_safety
+from crazyfly.config_validator import (
+    prepare_motion_capture_parameters,
+    validate,
+    validate_hardware_configuration,
+    validate_motion_capture,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_hardware_defaults_cannot_fly() -> None:
+    fleet = load_fleet(ROOT / "config" / "crazyflies.yaml")
+    safety = load_safety(ROOT / "config" / "safety.yaml")
+
+    assert not fleet.enabled
+    assert not safety.flight_enabled
+    assert not safety.has_geofence
+
+
+def test_mock_configuration_is_explicitly_bounded() -> None:
+    fleet, safety = validate(
+        str(ROOT / "config" / "mock_crazyflies.yaml"),
+        str(ROOT / "config" / "mock_safety.yaml"),
+    )
+
+    assert set(fleet.enabled) == {"cf1"}
+    assert safety.flight_enabled
+    assert safety.geofence_min == (-2.0, -2.0, 0.0)
+    assert safety.geofence_max == (2.0, 2.0, 1.0)
+
+
+def test_real_motive_address_is_required_for_hardware() -> None:
+    with pytest.raises(ConfigError, match="real Motive"):
+        validate(
+            str(ROOT / "config" / "crazyflies.yaml"),
+            str(ROOT / "config" / "safety.yaml"),
+            str(ROOT / "config" / "motion_capture.yaml"),
+            require_motive=True,
+        )
+
+
+def test_hardware_configuration_requires_explicit_flight_enable(
+    tmp_path: Path,
+) -> None:
+    motion = yaml.safe_load((ROOT / "config" / "motion_capture.yaml").read_text())
+    motion["/motion_capture_tracking"]["ros__parameters"]["hostname"] = "192.0.2.1"
+    motion_path = tmp_path / "motion.yaml"
+    motion_path.write_text(yaml.safe_dump(motion))
+
+    with pytest.raises(ConfigError, match="flight_enabled"):
+        validate_hardware_configuration(
+            str(ROOT / "config" / "crazyflies.yaml"),
+            str(ROOT / "config" / "safety.yaml"),
+            str(motion_path),
+        )
+
+
+def test_official_optitrack_backend_is_supported(tmp_path: Path) -> None:
+    motion = yaml.safe_load((ROOT / "config" / "motion_capture.yaml").read_text())
+    parameters = motion["/motion_capture_tracking"]["ros__parameters"]
+    parameters["type"] = "optitrack_closed_source"
+    parameters["hostname"] = "192.0.2.1"
+    motion_path = tmp_path / "motion.yaml"
+    motion_path.write_text(yaml.safe_dump(motion))
+
+    validated = validate_motion_capture(str(motion_path), require_motive=True)
+
+    assert validated["type"] == "optitrack_closed_source"
+
+
+def test_single_marker_tracking_is_prepared_for_mocap_only(tmp_path: Path) -> None:
+    fleet = yaml.safe_load((ROOT / "config" / "crazyflies.yaml").read_text())
+    fleet["robots"]["cf1"]["enabled"] = True
+    fleet["robots"]["cf1"]["initial_position"] = [1.0, 2.0, 0.1]
+    fleet_path = tmp_path / "fleet.yaml"
+    fleet_path.write_text(yaml.safe_dump(fleet))
+
+    parameters = prepare_motion_capture_parameters(
+        str(ROOT / "config" / "motion_capture.yaml"),
+        str(fleet_path),
+    )
+
+    assert parameters["rigid_bodies"] == {
+        "cf1": {
+            "initial_position": [1.0, 2.0, 0.1],
+            "marker": "default_single_marker",
+            "dynamics": "default",
+        }
+    }
+
+
+def test_unknown_single_marker_configuration_is_rejected(tmp_path: Path) -> None:
+    fleet = yaml.safe_load((ROOT / "config" / "crazyflies.yaml").read_text())
+    fleet["robots"]["cf1"]["enabled"] = True
+    fleet["robot_types"]["cf21"]["motion_capture"]["marker"] = "missing"
+    fleet_path = tmp_path / "fleet.yaml"
+    fleet_path.write_text(yaml.safe_dump(fleet))
+
+    with pytest.raises(ConfigError, match="unknown marker configuration"):
+        prepare_motion_capture_parameters(
+            str(ROOT / "config" / "motion_capture.yaml"),
+            str(fleet_path),
+        )
+
+
+def test_duplicate_radio_uri_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "crazyflies.yaml").read_text())
+    bad = deepcopy(source)
+    bad["robots"]["cf2"]["uri"] = bad["robots"]["cf1"]["uri"]
+    path = tmp_path / "duplicate.yaml"
+    path.write_text(yaml.safe_dump(bad))
+
+    with pytest.raises(ConfigError, match="duplicated"):
+        load_fleet(path)
+
+
+def test_flight_enabled_without_geofence_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source["crazyfly_safety"]["geofence"] = {}
+    path = tmp_path / "unbounded.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="explicit geofence"):
+        load_safety(path)
+
+
+def test_quoted_enabled_boolean_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "mock_crazyflies.yaml").read_text())
+    source["robots"]["cf1"]["enabled"] = "false"
+    path = tmp_path / "quoted_boolean.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="true or false"):
+        load_fleet(path)
+
+
+def test_non_finite_safety_limit_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source["crazyfly_safety"]["limits"]["maximum_command_speed_m_s"] = float("nan")
+    path = tmp_path / "nan_limit.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="finite number"):
+        load_safety(path)
+
+
+def test_invalid_radio_channel_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "mock_crazyflies.yaml").read_text())
+    source["robots"]["cf1"]["uri"] = "radio://0/126/2M/E7E7E7E701"
+    path = tmp_path / "bad_channel.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="between 0 and 125"):
+        load_fleet(path)

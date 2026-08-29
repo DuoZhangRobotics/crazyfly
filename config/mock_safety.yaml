@@ -1,0 +1,19 @@
+crazyfly_safety:
+  flight_enabled: true
+  timeouts:
+    pose_reject_s: 0.100
+    pose_land_s: 0.250
+    pose_emergency_s: 1.000
+    status_stale_s: 2.500
+    recovery_s: 1.000
+  battery:
+    warning_v: 3.8
+    critical_v: 3.7
+  limits:
+    maximum_takeoff_height_m: 0.5
+    maximum_command_speed_m_s: 0.25
+    minimum_separation_m: 0.4
+    soft_geofence_margin_m: 0.15
+  geofence:
+    min: [-2.0, -2.0, 0.0]
+    max: [2.0, 2.0, 1.0]

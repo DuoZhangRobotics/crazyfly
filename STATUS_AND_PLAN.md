@@ -1,23 +1,129 @@
-# Crazyflie + OptiTrack Swarm: Status and Implementation Plan
+# Crazyflie + OptiTrack Swarm: Status and Next Plan
 
 Last updated: 2026-08-28  
 Repository: <https://github.com/DuoZhangRobotics/crazyfly>  
-Target: Control five or more Crazyflie 2.0 drones using OptiTrack feedback and Crazyswarm2.
+Target: five or more Crazyflie 2.x vehicles using OptiTrack feedback and
+Crazyswarm2 on ROS 2 Jazzy.
 
-## 1. Objective
+## 1. Current outcome
 
-Build a reproducible research codebase that:
+The phone/no-sudo development phase is implemented. The repository is now an
+`ament_python` ROS 2 package with a mandatory project safety gateway, isolated
+mock environment, fail-closed physical launch, configuration and trajectory
+validation, and bounded experiment logging.
 
-- receives Crazyflie poses from OptiTrack/Motive over NatNet;
-- forwards external poses to the Crazyflie state estimators;
-- supports safe takeoff, landing, `goTo`, and synchronized trajectories;
-- controls at least five Crazyflies through one or more Crazyradio PA dongles;
-- records pose, command, battery, link, and experiment data;
-- provides emergency stop, tracking-loss handling, geofencing, and staged validation.
+Nothing physical was armed or flown. A Crazyradio is not currently visible on
+this Ubuntu machine.
 
-## 2. Selected architecture
+## 2. Installed environment
 
-The selected production architecture is:
+- Host: Ubuntu 24.04, x86_64.
+- ROS 2 Jazzy: installed under `/opt/ros/jazzy`.
+- Crazyswarm2 1.0.3 and `motion_capture_tracking` 1.0.6 are installed as
+  official ROS Jazzy packages under `/opt/ros/jazzy`.
+- Fast-CDR, Fast-DDS, ROSIDL, and RMW packages were upgraded to the compatible
+  versions supplied by the current ROS repository.
+- uv 0.12.7 manages `/home/duo/ros2_ws/.venv`, based on Python 3.12 with
+  read-only access to system ROS packages. Rowan 1.3.2 is installed only there.
+- The project is symlink-built under `/home/duo/ros2_ws`; its installed Python
+  executables use `/home/duo/ros2_ws/.venv/bin/python`.
+- The official Bitcraze udev rule is installed, and the user is in `plugdev`.
+- Activation helper: `tools/activate_ros.sh`; it loads ROS 2, uv, Crazyswarm2,
+  and the installed project package. The old userspace overlay is inactive and
+  retained only as a recovery fallback.
+- Free disk space after installation: approximately 2.9 GB.
+
+This environment is functional for development but remains machine-specific.
+Additional free disk space is recommended before broad system upgrades or
+building the optional upstream simulator. That simulator still lacks
+`cffirmware`; the repository's mock stack does not require it.
+
+## 3. Implemented repository
+
+### ROS package and configuration
+
+- `package.xml`, `setup.py`, `setup.cfg`, and the ament resource marker.
+- Production fleet template for `cf1` through `cf5`; every robot is disabled.
+- OptiTrack/Motive template with a required hostname placeholder.
+- Production safety template with physical flight disabled and no implicit
+  geofence.
+- Separate, clearly named mock fleet and mock safety files.
+- Declarative synchronized waypoint format and example mock square.
+
+### Safety gateway
+
+The gateway owns project takeoff, landing, and `go_to` requests. It validates
+fresh tracking/status, battery, supervisor state, geofence, command speed,
+takeoff height, and robot separation. It starts disabled and requires a stable
+one-second healthy interval before enabling.
+
+Tracking-loss behavior is staged:
+
+1. At 0.10 s, reject new commands.
+2. At 0.25 s, request a controlled landing.
+3. At 1.00 s, invoke the upstream emergency stop.
+
+Tumble, supervisor lock, hard geofence breach, and live separation violation
+invoke the emergency stop immediately.
+
+Public project interfaces:
+
+- `/crazyfly/preflight` (`std_srvs/Trigger`)
+- `/crazyfly/enable` (`std_srvs/SetBool`)
+- `/crazyfly/emergency` (`crazyflie_interfaces/Stop`)
+- `/crazyfly/<robot>/takeoff`
+- `/crazyfly/<robot>/land`
+- `/crazyfly/<robot>/go_to`
+- `/crazyfly/commands`
+- `/crazyfly/safety/state`
+- `/crazyfly/safety/diagnostics`
+
+### Launch separation
+
+- `mock_stack.launch.py` starts only the hardware-free mock and safety gateway.
+- `mocap_only.launch.py` starts no node unless `allow_network:=true`; it never
+  starts Crazyswarm2 or a radio server.
+- `swarm.launch.py` defaults `allow_hardware:=false`. When enabled, it validates
+  the fleet, safety bounds, initial separation, 2M URIs, and real Motive address
+  before the upstream server starts. A reviewed local file must also explicitly
+  set `flight_enabled: true`.
+
+### Experiment tooling
+
+- Trajectories are dry-run only unless `--execute` is supplied.
+- The runner sends commands only to `/crazyfly/...` services.
+- The logger writes an event stream and a manifest with configuration paths and
+  SHA-256 hashes.
+- Accepted, rejected, safety-land, and emergency actions are published on the
+  command event topic and included in JSONL/rosbag output.
+- Optional rosbag recording refuses to start below 1 GB free and has a maximum
+  duration.
+- Old direct-cflib scripts moved to `tools/legacy/` with risk documentation.
+
+## 4. Verification completed
+
+The following passed on this machine:
+
+- Python compilation for application, launch, and test modules.
+- 29 automated tests covering safe defaults, invalid configurations, Motive
+  placeholders, duplicate radios, recovery time, battery, tumble, command
+  limits, geofence, separation, trajectories, and architecture boundaries.
+- Clean `colcon` build in an isolated workspace.
+- ROS package discovery and parsing of all three launch descriptions.
+- Live mock preflight and enable.
+- Live mock takeoff to 0.30 m over two seconds.
+- Simulated tracking loss: controlled-land request at 0.25 s and emergency stop
+  at 1.00 s.
+- The physical launch with committed files fails before upstream hardware nodes
+  start.
+- Wired multicast NatNet reception from Motive 2.0 at `172.16.90.213` is stable
+  at approximately 120 Hz; Motive reports NatNet 3.0.
+- The latest live check produced an empty unlabeled point cloud and no `/poses`.
+  A visible free marker is the remaining physical prerequisite for assignment.
+- The mocap-only launch now loads an enabled local fleet and generates named
+  single-marker tracker entries without starting Crazyswarm2 or a radio server.
+
+## 5. Selected physical architecture
 
 ```text
 OptiTrack cameras
@@ -27,289 +133,103 @@ Motive on Windows
         |
         | NatNet/UDP over wired Ethernet
         v
-Crazyswarm2 + ROS 2 on native Ubuntu 24.04
+Crazyswarm2 + safety gateway on native Ubuntu 24.04
         |
         | USB
         v
 Crazyradio PA
         |
-        | CRTP radio, preferably 2M with unique addresses
+        | CRTP, 2M, unique address per vehicle
         v
-Crazyflie 2.0 fleet
+Crazyflie fleet
 ```
 
-Use ROS 2 Jazzy on Ubuntu 24.04. Do not use the Windows Motive machine as the
-flight-control computer. Avoid WSL and virtual machines for physical flight due
-to USB and latency complications.
+Motive remains a tracking server. Physical control stays on native Ubuntu; do
+not move the flight stack into WSL or a virtual machine.
 
-## 3. Available systems
+## 6. Physical information still required
 
-- **Development machine:** Apple Silicon MacBook.
-- **Motion capture:** OptiTrack is available and Motive runs on Windows.
-- **Flight-control machine:** A native Ubuntu 24.04 machine is available. A
-  personal user account still needs to be created and validated.
-- **Radio:** Crazyradio PA is available.
-- **Aircraft:** Multiple Crazyflie 2.0 units are available.
-- **Positioning decks:** No Flow deck was detected on the units tested so far.
+Confirmed network: Motive 2.0/NatNet 3.0 is `172.16.90.213`; Ubuntu is
+`172.16.90.195/27`; wired multicast is working. Still required:
 
-## 4. Repository status
+- Measured flight-volume minimum and maximum in the Motive world frame.
+- Final marker mount offset and measured initial position for each vehicle.
+- Physical label, radio URI, firmware, and battery ID for each vehicle.
+- Crazyradio PA firmware version and USB visibility after udev setup.
 
-The repository has been initialized and pushed to GitHub.
+Previously tested aircraft reported CRTP protocol version 4, so firmware must be
+reviewed before Crazyswarm2 flight. One battery showed severe voltage sag and
+must remain quarantined. A previous open-loop hop reached the ceiling; those
+legacy scripts are not acceptable production tests.
 
-- Branch: `main`
-- Last known pushed project commit: `3169c66`
-- Commit message: `Add Crazyflie diagnostics and flight test tools`
-- Python syntax checks passed before that push.
-- `.venv`, `.cache`, `__pycache__`, and bytecode are ignored.
+## 7. Next physical bring-up plan
 
-Current scripts:
+### Stage A: host setup completed
 
-| File | Purpose | Production status |
-| --- | --- | --- |
-| `cf_diagnostics.py` | Read-only battery, attitude, deck, and `sys.canfly` checks | Bring-up tool |
-| `inspect_usb_radio.py` | Reads channel, data rate, and address from configuration EEPROM over USB | Bring-up tool |
-| `quick_radio_probe.py` | Fast acknowledgment check without downloading firmware tables | Bring-up tool |
-| `flow_hover_test.py` | Short hover only when a Flow deck is detected | Experimental |
-| `motor_spin_test.py` | Telemetry-guarded, below-liftoff motor test | Experimental |
-| `quick_motor_spin.py` | Direct low-level motor spin that bypasses telemetry setup | Experimental/high risk |
-| `brief_hop_test.py` | Short open-loop thrust pulse with telemetry cutoffs | Experimental/high risk |
-| `quick_one_second_hop.py` | Direct one-second open-loop hop without telemetry | Experimental/high risk |
+The official Crazyswarm2 and motion-capture packages, matching middleware,
+Bitcraze udev rule, uv environment, permanent workspace build, and automated
+tests are installed. Free additional disk space before any broad OS upgrade or
+optional simulator build.
 
-The existing flight scripts are hardware experiments. They are **not** the
-production OptiTrack controller and must not be used as the basis for swarm
-flight.
+### Stage B: OptiTrack only, motors disconnected
 
-## 5. Verified hardware findings
+1. Create ignored local motion-capture configuration with the real Motive IP.
+2. Enable NatNet streaming on the correct Windows Ethernet interface.
+3. Remove or disable unrelated Motive assets and stream unlabeled markers.
+4. Launch only `mocap_only.launch.py` with a local fleet file containing measured
+   initial marker positions.
+5. Confirm `/poses` rate, identity, world axes, position, and dropout timing.
+6. Move each marker by hand and verify there are no swaps. Single-marker tracking
+   intentionally provides no external orientation.
 
-### Unit using address `E7E7E7E707`
+Acceptance: stable 80-120 Hz data and correct `cf1`-`cf5` identity with no
+Crazyflie server running.
 
-- URI: `radio://0/80/2M/E7E7E7E707`
-- Radio and basic telemetry passed.
-- No expansion deck detected.
-- One tested battery suffered severe voltage sag under motor load and must not
-  be used for flight.
+### Stage C: one aircraft, propellers removed
 
-### Unit using the default address
+1. Inventory and label one test Crazyflie and battery.
+2. Update firmware through the official procedure if required.
+3. Assign a unique 2M URI and update only the ignored local fleet file.
+4. Connect through Crazyswarm2 and check battery, supervisor, link quality, and
+   emergency service.
+5. Compare OptiTrack pose with the onboard estimate while moving it by hand.
+6. Test tracking dropout and gateway command rejection without propellers.
 
-- Stored URI: `radio://0/80/250K/E7E7E7E7E7`
-- The fast radio probe confirmed the unit responds at this URI.
-- A full `cflib` connection at 250K stalled or emitted:
-  `Address did not match when adding data to read request!`
-- A direct open-loop hop at thrust `46000` reached the ceiling. The user found
-  that approximately `35000` produced a much smaller hop.
-- The vehicle drifted sideways because the open-loop script had no external
-  position feedback. This is expected and is the reason OptiTrack feedback is
-  required.
+Acceptance: one correctly identified aircraft, current firmware, healthy
+battery, stable link, matching pose, and verified stop path.
 
-## 6. Firmware status and requirement
+### Stage D: one controlled flight
 
-The tested Crazyflies reported CRTP protocol version `4`. Current supervisor
-features use protocol `12+`; the library only operated through legacy fallbacks.
+1. Measure and review the local geofence.
+2. Use one vehicle, low speed, 0.30 m takeoff, and a clear netted volume.
+3. Assign a dedicated physical emergency-stop operator.
+4. Pass takeoff/hover/short `go_to`/land before testing fault behavior.
+5. Review logs and battery sag after every run.
 
-Before production Crazyswarm2 flight:
+### Stage E: scale to five
 
-1. Update one spare/test Crazyflie first using the latest official CFclient.
-2. Use **Connect -> Bootloader** and select the latest official release for
-   platform `cf2`.
-3. Flash through the Crazyradio, not through the Crazyflie USB connection.
-4. Use a fully charged battery and do not interrupt the update.
-5. Record the existing URI before flashing.
-6. After flashing, power-cycle and verify LEDs, console output, telemetry, and
-   supervisor state.
-7. Give every Crazyflie a unique address and configure `2M` for swarm use.
-8. Only after the first unit passes should the procedure be repeated for the
-   remaining aircraft.
-9. Update the Crazyradio PA firmware as recommended by the current Crazyswarm2
-   installation documentation.
+Add one aircraft at a time. Require a unique URI, current firmware, correct
+single-marker identity, healthy battery, stable simultaneous links, and
+sequential takeoff/landing before synchronized trajectories. Begin well above
+0.40 m separation and commands no faster than 0.25 m/s.
 
-Suggested fleet addresses:
+## 8. Non-negotiable constraints
 
-```text
-cf1: radio://0/80/2M/E7E7E7E701
-cf2: radio://0/80/2M/E7E7E7E702
-cf3: radio://0/80/2M/E7E7E7E703
-cf4: radio://0/80/2M/E7E7E7E704
-cf5: radio://0/80/2M/E7E7E7E705
-```
+- Never bypass `/crazyfly/...` with project flight code.
+- Never enable all aircraft at once during bring-up.
+- Never fly before Motive identity and axes are verified.
+- Prefer propellers-off tests for firmware, radio, pose, estimator, and fault
+  validation.
+- Do not weaken tracking-loss, battery, geofence, separation, or supervisor
+  checks to make a test pass.
+- Do not use the archived open-loop hop scripts indoors.
+- Keep people clear, wear eye protection, and inspect vehicles after contact.
+- Validate batteries under controlled load; resting voltage is insufficient.
 
-Do not change all aircraft at once. Maintain an inventory mapping the physical
-label, Crazyflie address, OptiTrack name, firmware version, and battery ID.
+## 9. Known boundary
 
-## 7. OptiTrack/Motive plan
-
-Windows is a dedicated Motive data server. Ubuntu receives tracking frames over
-wired Ethernet.
-
-Motive settings:
-
-- enable NatNet streaming;
-- start with multicast transmission;
-- select the Ethernet interface connected to the Ubuntu machine;
-- use Z-up coordinates;
-- stream rigid bodies;
-- stream unlabeled markers if using Crazyswarm2 frame-to-frame tracking;
-- keep default NatNet ports: UDP 1510 command and UDP 1511 data;
-- allow Motive/NatNet through Windows Firewall.
-
-For the first implementation, prefer unique rigid bodies named exactly like the
-Crazyswarm2 robot entries:
-
-```text
-cf1
-cf2
-cf3
-cf4
-cf5
-```
-
-Verify every rigid body's position and orientation in RViz with motors disabled
-before forwarding pose data to any flight controller.
-
-## 8. Ubuntu bootstrap plan
-
-Create a normal personal Ubuntu account with sudo access. Do not run the flight
-stack as root.
-
-First collect:
-
-```bash
-whoami
-lsb_release -ds
-uname -m
-sudo -v
-ip -br address
-```
-
-Expected platform: Ubuntu 24.04, preferably `x86_64`.
-
-Then:
-
-1. Install ROS 2 Jazzy from the official ROS apt repository.
-2. Install `ros-jazzy-desktop` and `ros-dev-tools`.
-3. Add `/opt/ros/jazzy/setup.bash` to the user's shell startup.
-4. Verify ROS using the standard talker/listener demo.
-5. Install Crazyswarm2 and `motion_capture_tracking`.
-6. Configure Crazyradio Linux USB permissions/udev rules.
-7. Clone this repository under `~/ros2_ws/src/crazyfly`.
-8. Turn this repository into a custom `ament_python` ROS 2 package rather than
-   editing Crazyswarm2 itself.
-
-## 9. Planned repository structure
-
-The server implementation should move toward:
-
-```text
-crazyfly/
-  config/
-    crazyflies.yaml
-    motion_capture.yaml
-    server.yaml
-    safety.yaml
-  launch/
-    swarm.launch.py
-    mocap_only.launch.py
-  crazyfly/
-    __init__.py
-    safety_monitor.py
-    trajectory_runner.py
-    experiment_logger.py
-  scripts/
-    takeoff_land.py
-    single_drone_goto.py
-    five_drone_trajectory.py
-  tools/
-    existing bring-up and experimental scripts
-  test/
-    configuration and trajectory tests
-  package.xml
-  setup.py
-  setup.cfg
-  README.md
-```
-
-Keep hardware-specific IP addresses and local interface names in untracked local
-configuration or environment files. Commit example configuration files with safe
-placeholders.
-
-## 10. Milestones and acceptance criteria
-
-### Milestone A: Ubuntu and ROS 2
-
-- Ubuntu account works and has sudo access.
-- ROS 2 Jazzy talker/listener works.
-- Repository is cloned into the ROS workspace.
-
-### Milestone B: OptiTrack data only
-
-- Ubuntu can ping the Motive PC over wired Ethernet.
-- `motion_capture_tracking` receives NatNet data.
-- `/poses` publishes at a stable rate.
-- `cf1` through `cf5` have correct positions, identities, axes, and orientations
-  in RViz.
-- Tracking loss is detectable before any motors are enabled.
-
-### Milestone C: One updated Crazyflie
-
-- One test unit has current `cf2` firmware.
-- It uses a unique `2M` URI.
-- Crazyswarm2 connects and reads battery/status.
-- OptiTrack external pose agrees with the onboard estimate while the vehicle is
-  moved by hand with propellers removed.
-
-### Milestone D: Single-drone controlled flight
-
-- Emergency stop works before takeoff.
-- The flight volume and maximum altitude are configured.
-- One drone takes off to 0.3-0.5 m, holds position, executes a small `goTo`, and
-  lands.
-- Tracking dropout and low-battery behavior are tested safely.
-
-### Milestone E: Five-drone swarm
-
-- All five aircraft have unique URIs, current firmware, healthy batteries, and
-  correct rigid-body associations.
-- All five can connect simultaneously without excessive packet loss.
-- Sequential takeoff/landing passes before synchronized flight.
-- A low-speed, well-separated formation trajectory passes.
-- Experiment logs contain commanded and measured poses, battery, link state,
-  tracking state, and emergency events.
-
-## 11. Safety constraints for all future agents
-
-- Do not run `quick_one_second_hop.py` indoors as a production test; it has
-  already sent a Crazyflie into the ceiling.
-- Do not disable emergency stop, link-loss handling, tracking-loss handling, or
-  battery thresholds.
-- Do not fly before OptiTrack identity and coordinate axes are verified in RViz.
-- Use propellers-off tests for radio, firmware, pose, configuration, and estimator
-  validation whenever possible.
-- Start with one aircraft. Add additional aircraft only after the prior milestone
-  passes.
-- Keep people clear of the flight volume and establish a physical emergency-stop
-  operator during initial tests.
-- Inspect propellers and motor shafts after any ceiling or wall contact.
-- Never assume a battery is healthy based only on resting voltage; validate sag
-  under a controlled health test.
-
-## 12. Information still needed
-
-The server Codex should request or discover:
-
-- Ubuntu username and whether sudo access is available;
-- Ubuntu CPU architecture;
-- Ubuntu Ethernet interface and IP;
-- Motive PC IP and Motive/NatNet version;
-- whether multicast is permitted on the lab switch;
-- the selected tracking mode: Motive vendor rigid bodies or
-  `librigidbodytracker`;
-- the physical inventory of Crazyflies and batteries;
-- current firmware and radio settings for every Crazyflie;
-- Crazyradio PA firmware version;
-- dimensions and coordinate origin of the approved flight volume.
-
-## 13. Immediate next action
-
-On the Ubuntu machine, create the user account and collect the five system-check
-outputs in Section 8. Do not install or modify firmware until those results are
-reviewed. After ROS 2 is verified, install Crazyswarm2 and validate OptiTrack data
-with motors disabled before working on flight commands.
+The gateway is an application safety boundary, not a ROS security policy. An
+operator can still call upstream Crazyswarm2 services directly if they choose
+to bypass it. Repository tests prevent application modules from importing the
+direct Crazyswarm API, and all documented commands use the gateway. A lab
+operating procedure must enforce the same boundary for interactive commands.

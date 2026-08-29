@@ -206,8 +206,17 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# ROS 2 generated output and local experiment data
+log/
+install/
+config/local/
+experiments/
+
 # PyPI configuration file
 .pypirc
+
+# Local Crazyswarm overlay downloads
+.packages/
 
 # Marimo
 marimo/_static/

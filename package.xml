@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>crazyfly</name>
+  <version>0.1.0</version>
+  <description>Safety-gated OptiTrack and Crazyswarm2 experiment control.</description>
+  <maintainer email="duo@example.invalid">Duo Zhang Robotics</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>crazyflie</exec_depend>
+  <exec_depend>crazyflie_interfaces</exec_depend>
+  <exec_depend>crazyflie_py</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>motion_capture_tracking</exec_depend>
+  <exec_depend>motion_capture_tracking_interfaces</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosbag2</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <test_depend>ament_pytest</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

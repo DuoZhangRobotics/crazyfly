@@ -1,0 +1,62 @@
+# Production template. Enabling any robot is a deliberate local-site change.
+fileversion: 3
+
+robots:
+  cf1:
+    enabled: false
+    uri: radio://0/80/2M/E7E7E7E701
+    initial_position: [-0.8, -0.4, 0.0]
+    type: cf21
+  cf2:
+    enabled: false
+    uri: radio://0/80/2M/E7E7E7E702
+    initial_position: [-0.4, -0.4, 0.0]
+    type: cf21
+  cf3:
+    enabled: false
+    uri: radio://0/80/2M/E7E7E7E703
+    initial_position: [0.0, -0.4, 0.0]
+    type: cf21
+  cf4:
+    enabled: false
+    uri: radio://0/80/2M/E7E7E7E704
+    initial_position: [0.4, -0.4, 0.0]
+    type: cf21
+  cf5:
+    enabled: false
+    uri: radio://0/80/2M/E7E7E7E705
+    initial_position: [0.8, -0.4, 0.0]
+    type: cf21
+
+robot_types:
+  cf21:
+    motion_capture:
+      tracking: librigidbodytracker
+      marker: default_single_marker
+      dynamics: default
+    big_quad: false
+    battery:
+      voltage_warning: 3.8
+      voltage_critical: 3.7
+
+all:
+  firmware_logging:
+    enabled: true
+    default_topics:
+      pose:
+        frequency: 10
+      status:
+        frequency: 1
+  firmware_params:
+    commander:
+      enHighLevel: 1
+    stabilizer:
+      estimator: 2
+      controller: 2
+    locSrv:
+      extPosStdDev: 0.001
+      extQuatStdDev: 0.05
+  reference_frame: world
+  broadcasts:
+    num_repeats: 15
+    delay_between_repeats_ms: 1
