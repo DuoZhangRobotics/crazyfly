@@ -23,7 +23,9 @@ def _parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("drone_index", choices=DRONE_INDICES)
-    parser.add_argument("--execute", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--execute", action="store_true")
+    mode.add_argument("--ros-only", action="store_true")
     return parser
 
 
@@ -31,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     args, hover_arguments = _parser().parse_known_args(argv)
     if args.execute:
         hover_arguments.append("--execute")
+    elif args.ros_only:
+        hover_arguments.append("--ros-only")
     robot_name = f"cf{int(args.drone_index)}"
     data = yaml.safe_load(FLEET.read_text(encoding="utf-8"))
     for name, robot in data["robots"].items():

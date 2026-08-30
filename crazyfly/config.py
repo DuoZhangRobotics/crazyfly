@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
-import re
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import yaml
 
+from .geofence_transform import (
+    GeofenceTransformError,
+    Matrix4,
+    load_base_from_world,
+    transform_point,
+)
 
 RADIO_URI = re.compile(
     r"^radio://(?P<radio>\d+)/(?P<channel>\d+)/"
@@ -55,6 +62,8 @@ class SafetyConfig:
     maximum_command_speed_m_s: float
     minimum_separation_m: float
     soft_geofence_margin_m: float
+    geofence_frame: str
+    geofence_from_world: Matrix4 | None
     geofence_min: tuple[float, float, float] | None
     geofence_max: tuple[float, float, float] | None
 
@@ -86,7 +95,11 @@ def _finite_number(value: Any, field: str) -> float:
 
 
 def _vector3(value: Any, field: str) -> tuple[float, float, float]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 3:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or len(value) != 3
+    ):
         raise ConfigError(f"{field} must contain exactly three finite numbers")
     result = tuple(_finite_number(component, field) for component in value)
     return result  # type: ignore[return-value]
@@ -104,8 +117,13 @@ def _validate_robot_type(robot_types: Mapping[Any, Any], name: str) -> None:
         raise ConfigError(f"robot type {name!r} has invalid motion_capture.tracking")
     if tracking == "librigidbodytracker":
         for field in ("marker", "dynamics"):
-            if not isinstance(motion_capture.get(field), str) or not motion_capture[field]:
-                raise ConfigError(f"robot type {name!r} requires motion_capture.{field}")
+            if (
+                not isinstance(motion_capture.get(field), str)
+                or not motion_capture[field]
+            ):
+                raise ConfigError(
+                    f"robot type {name!r} requires motion_capture.{field}"
+                )
 
 
 def load_fleet(path: str | Path) -> FleetConfig:
@@ -125,7 +143,9 @@ def load_fleet(path: str | Path) -> FleetConfig:
     validated_types: set[str] = set()
     for name, raw in raw_robots.items():
         if not isinstance(name, str) or not ROBOT_NAME.fullmatch(name):
-            raise ConfigError(f"invalid robot name {name!r}; expected cf followed by digits")
+            raise ConfigError(
+                f"invalid robot name {name!r}; expected cf followed by digits"
+            )
         if not isinstance(raw, Mapping):
             raise ConfigError(f"robot {name} must be a mapping")
         uri = str(raw.get("uri", ""))
@@ -163,7 +183,8 @@ def load_fleet(path: str | Path) -> FleetConfig:
 
 
 def load_safety(path: str | Path) -> SafetyConfig:
-    root = load_yaml(path)
+    source_path = Path(path).expanduser().resolve()
+    root = load_yaml(source_path)
     data = root.get("crazyfly_safety")
     if not isinstance(data, Mapping):
         raise ConfigError("safety configuration must define crazyfly_safety")
@@ -184,12 +205,34 @@ def load_safety(path: str | Path) -> SafetyConfig:
     if not isinstance(flight_enabled, bool):
         raise ConfigError("crazyfly_safety.flight_enabled must be true or false")
 
+    geofence_frame = fence.get("frame", "world")
+    if not isinstance(geofence_frame, str) or geofence_frame not in {"world", "base"}:
+        raise ConfigError("geofence.frame must be world or base")
+    geofence_from_world: Matrix4 | None = None
+    transform_file = fence.get("transform_file")
+    if geofence_frame == "base":
+        if not isinstance(transform_file, str) or not transform_file.strip():
+            raise ConfigError("base-frame geofence requires geofence.transform_file")
+        transform_path = Path(transform_file).expanduser()
+        if not transform_path.is_absolute():
+            transform_path = source_path.parent / transform_path
+        try:
+            geofence_from_world = load_base_from_world(transform_path)
+        except GeofenceTransformError as exc:
+            raise ConfigError(str(exc)) from exc
+    elif transform_file is not None:
+        raise ConfigError(
+            "geofence.transform_file is only valid when geofence.frame is base"
+        )
+
     fence_min = fence.get("min")
     fence_max = fence.get("max")
     geofence_min = None if fence_min is None else _vector3(fence_min, "geofence.min")
     geofence_max = None if fence_max is None else _vector3(fence_max, "geofence.max")
     if (geofence_min is None) != (geofence_max is None):
-        raise ConfigError("geofence min and max must either both be set or both be omitted")
+        raise ConfigError(
+            "geofence min and max must either both be set or both be omitted"
+        )
     if geofence_min is not None and any(
         low >= high for low, high in zip(geofence_min, geofence_max)
     ):
@@ -234,20 +277,30 @@ def load_safety(path: str | Path) -> SafetyConfig:
             limits.get("soft_geofence_margin_m", 0.15),
             "limits.soft_geofence_margin_m",
         ),
+        geofence_frame=geofence_frame,
+        geofence_from_world=geofence_from_world,
         geofence_min=geofence_min,
         geofence_max=geofence_max,
     )
-    if not 0 < config.pose_reject_age_s < config.pose_land_age_s < config.pose_emergency_age_s:
+    if (
+        not 0
+        < config.pose_reject_age_s
+        < config.pose_land_age_s
+        < config.pose_emergency_age_s
+    ):
         raise ConfigError("pose timeouts must satisfy reject < land < emergency")
     if not 0 < config.battery_critical_v <= config.battery_warning_v:
         raise ConfigError("battery thresholds must satisfy 0 < critical <= warning")
-    if min(
-        config.status_stale_age_s,
-        config.recovery_time_s,
-        config.maximum_takeoff_height_m,
-        config.maximum_command_speed_m_s,
-        config.minimum_separation_m,
-    ) <= 0:
+    if (
+        min(
+            config.status_stale_age_s,
+            config.recovery_time_s,
+            config.maximum_takeoff_height_m,
+            config.maximum_command_speed_m_s,
+            config.minimum_separation_m,
+        )
+        <= 0
+    ):
         raise ConfigError("safety timeouts and limits must be positive")
     if config.soft_geofence_margin_m < 0:
         raise ConfigError("soft geofence margin must be non-negative")
@@ -263,6 +316,20 @@ def load_safety(path: str | Path) -> SafetyConfig:
     return config
 
 
+def point_in_geofence_frame(
+    point: Sequence[float], safety: SafetyConfig
+) -> tuple[float, float, float]:
+    values = tuple(float(value) for value in point)
+    if len(values) != 3 or not all(isfinite(value) for value in values):
+        raise ConfigError("geofence point must contain three finite values")
+    if safety.geofence_from_world is None:
+        return values  # type: ignore[return-value]
+    try:
+        return transform_point(safety.geofence_from_world, values)
+    except GeofenceTransformError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
 def point_inside_geofence(
     point: Sequence[float], safety: SafetyConfig, margin: float = 0.0
 ) -> bool:
@@ -271,5 +338,9 @@ def point_inside_geofence(
     assert safety.geofence_min is not None and safety.geofence_max is not None
     return all(
         low + margin <= value <= high - margin
-        for value, low, high in zip(point, safety.geofence_min, safety.geofence_max)
+        for value, low, high in zip(
+            point_in_geofence_frame(point, safety),
+            safety.geofence_min,
+            safety.geofence_max,
+        )
     )

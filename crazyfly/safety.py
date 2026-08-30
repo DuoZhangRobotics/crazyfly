@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from math import dist, isfinite
-from typing import Iterable, Sequence
 
-from .config import SafetyConfig, point_inside_geofence
-
+from .config import (
+    SafetyConfig,
+    point_in_geofence_frame,
+    point_inside_geofence,
+)
 
 CAN_BE_ARMED = 1
 IS_ARMED = 2
@@ -361,8 +364,9 @@ class SafetyMachine:
                     item.position, self.config
                 ):
                     reasons.append(f"hard geofence breach: {name}")
-                elif self.state == SafetyState.FLYING and not self._inside_live_soft_fence(
-                    item.position
+                elif (
+                    self.state == SafetyState.FLYING
+                    and not self._inside_live_soft_fence(item.position)
                 ):
                     reasons.append(f"soft geofence margin: {name}")
 
@@ -378,15 +382,16 @@ class SafetyMachine:
         assert self.config.geofence_min is not None
         assert self.config.geofence_max is not None
         margin = self.config.soft_geofence_margin_m
+        coordinates = point_in_geofence_frame(point, self.config)
         return (
             self.config.geofence_min[0] + margin
-            <= point[0]
+            <= coordinates[0]
             <= self.config.geofence_max[0] - margin
             and self.config.geofence_min[1] + margin
-            <= point[1]
+            <= coordinates[1]
             <= self.config.geofence_max[1] - margin
             and self.config.geofence_min[2]
-            <= point[2]
+            <= coordinates[2]
             <= self.config.geofence_max[2] - margin
         )
 

@@ -48,7 +48,9 @@ def _parser() -> argparse.ArgumentParser:
             "for the selected robots. Defaults to a hardware-free dry run."
         )
     )
-    parser.add_argument("--execute", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--execute", action="store_true")
+    mode.add_argument("--ros-only", action="store_true")
     parser.add_argument("--fleet", default=str(DEFAULT_FLEET))
     parser.add_argument("--safety", default=str(DEFAULT_SAFETY))
     parser.add_argument("--motion-capture", default=str(DEFAULT_MOTION_CAPTURE))
@@ -278,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(f"Crazyradio is free: {device}")
-        if not args.execute:
+        if not args.execute and not args.ros_only:
             print("DRY RUN: no ROS process, radio connection, or command was started")
             return 0
         if shutil.which("ros2") is None:
@@ -299,7 +301,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"server_config_file:={Path(args.server).resolve()}",
             ]
             launch_process = subprocess.Popen(command, start_new_session=True)
-            _run_sequence(launch_process)
+            if args.ros_only:
+                print(
+                    "ROS-only mode is running; gateway remains disabled. "
+                    "Press Ctrl+C to stop.",
+                    flush=True,
+                )
+                while launch_process.poll() is None:
+                    time.sleep(0.25)
+                raise RuntimeError(
+                    f"ROS launch exited unexpectedly with code {launch_process.returncode}"
+                )
+            else:
+                _run_sequence(launch_process)
         return 0
     except KeyboardInterrupt:
         print(
