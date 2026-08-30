@@ -83,6 +83,13 @@ def test_synchronized_mode_requires_an_explicit_flag() -> None:
     assert args.synchronized
 
 
+def test_touchdown_speed_is_recoverable_between_staged_flights() -> None:
+    assert all(
+        "implausible pose speed" not in reason
+        for reason in four_drone_hover.HARD_ENABLE_FAILURES
+    )
+
+
 def test_missing_startup_telemetry_is_retryable() -> None:
     error = RuntimeError(
         "startup telemetry unavailable: missing status for cf3; "

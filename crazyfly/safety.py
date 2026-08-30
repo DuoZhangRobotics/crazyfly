@@ -170,6 +170,7 @@ class SafetyMachine:
 
     def evaluate(self, now: float) -> Evaluation:
         reasons = self._health_reasons(now, preflight=False)
+        active_names = self._active_robot_names()
         hard_faults = [
             reason
             for reason in reasons
@@ -184,6 +185,7 @@ class SafetyMachine:
                     "separation",
                 )
             )
+            and not self._inactive_supervisor_fault(reason, active_names)
         ]
         if not reasons:
             if self.healthy_since is None:
@@ -207,8 +209,18 @@ class SafetyMachine:
         maximum_pose_age = max(
             self._ages(now, "pose_received_at"), default=float("inf")
         )
+        status_health = [
+            self.health[name]
+            for name in (active_names or set(self.robot_names))
+        ]
         maximum_status_age = max(
-            self._ages(now, "status_received_at"), default=float("inf")
+            (
+                float("inf")
+                if item.status_received_at is None
+                else now - item.status_received_at
+                for item in status_health
+            ),
+            default=float("inf"),
         )
 
         if self.state in {SafetyState.FLYING, SafetyState.LANDING}:
@@ -240,6 +252,13 @@ class SafetyMachine:
                 reason
                 for reason in reasons
                 if reason.startswith("implausible pose speed")
+                and (
+                    not active_names
+                    or any(
+                        reason.startswith(f"implausible pose speed: {name} ")
+                        for name in active_names
+                    )
+                )
             ]
             if pose_jump_faults and self.state is SafetyState.FLYING:
                 if self.config.pose_speed_action == "emergency":
@@ -302,7 +321,7 @@ class SafetyMachine:
                 item.battery_voltage is None
                 or not isfinite(item.battery_voltage)
                 or item.battery_voltage <= self.config.battery_critical_v
-                for item in self.health.values()
+                for item in status_health
             )
             if battery_fault:
                 self.state = SafetyState.LANDING
@@ -418,6 +437,20 @@ class SafetyMachine:
             for item in self.health.values()
         ]
 
+    def _active_robot_names(self) -> set[str]:
+        if self.state not in {SafetyState.FLYING, SafetyState.LANDING}:
+            return set()
+        return set(self._takeoff_requested)
+
+    @staticmethod
+    def _inactive_supervisor_fault(reason: str, active_names: set[str]) -> bool:
+        if not active_names:
+            return False
+        prefixes = ("tumbled:", "locked:", "crashed:", "cannot fly:")
+        if not reason.startswith(prefixes):
+            return False
+        return reason.rsplit(":", 1)[-1].strip() not in active_names
+
     def _raw_marker_fault_duration(self, now: float) -> float:
         if self.config.expected_raw_marker_count is None:
             return 0.0
@@ -493,6 +526,10 @@ class SafetyMachine:
                     reasons.append(f"hard geofence breach: {name}")
                 elif (
                     self.state == SafetyState.FLYING
+                    and (
+                        not self._takeoff_requested
+                        or name in self._takeoff_requested
+                    )
                     and not self._inside_live_soft_fence(item.position)
                 ):
                     reasons.append(f"soft geofence margin: {name}")

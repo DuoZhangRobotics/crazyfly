@@ -259,6 +259,50 @@ def test_loss_of_can_fly_is_an_immediate_hard_stop() -> None:
     assert result.state is SafetyState.EMERGENCY
 
 
+def test_inactive_staged_drone_cannot_fly_does_not_stop_active_drone() -> None:
+    machine = _ready_machine(("cf1", "cf2"))
+    machine.mark_flying("cf1")
+    machine.record_pose("cf1", (0.0, 0.0, 0.3), 1.02)
+    machine.record_pose("cf2", (1.0, 0.0, 0.3), 1.02)
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
+    machine.record_status("cf2", 4.1, CAN_BE_ARMED, 1.02)
+
+    result = machine.evaluate(1.02)
+
+    assert result.action is SafetyAction.NONE
+    assert result.state is SafetyState.FLYING
+    assert "cannot fly: cf2" in result.reasons
+
+
+def test_active_staged_drone_cannot_fly_is_an_emergency() -> None:
+    machine = _ready_machine(("cf1", "cf2"))
+    machine.mark_flying("cf1")
+    machine.record_pose("cf1", (0.0, 0.0, 0.3), 1.02)
+    machine.record_pose("cf2", (1.0, 0.0, 0.3), 1.02)
+    machine.record_status("cf1", 4.1, CAN_BE_ARMED, 1.02)
+    machine.record_status("cf2", 4.1, SUPERVISOR_READY, 1.02)
+
+    result = machine.evaluate(1.02)
+
+    assert result.action is SafetyAction.EMERGENCY
+    assert result.reasons == ("cannot fly: cf1",)
+
+
+def test_inactive_staged_drone_critical_battery_does_not_land_active() -> None:
+    machine = _ready_machine(("cf1", "cf2"))
+    machine.mark_flying("cf1")
+    machine.record_pose("cf1", (0.0, 0.0, 0.3), 1.02)
+    machine.record_pose("cf2", (1.0, 0.0, 0.3), 1.02)
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
+    machine.record_status("cf2", 3.0, SUPERVISOR_READY, 1.02)
+
+    result = machine.evaluate(1.02)
+
+    assert result.action is SafetyAction.NONE
+    assert result.state is SafetyState.FLYING
+    assert "battery below threshold for cf2" in result.reasons
+
+
 def test_tumble_is_an_immediate_hard_stop() -> None:
     machine = _ready_machine()
     machine.mark_flying()

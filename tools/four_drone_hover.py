@@ -30,6 +30,15 @@ DEFAULT_SERVER = ROOT / "config" / "server.yaml"
 DEFAULT_OUTPUT_ROOT = ROOT / "experiments"
 EXPECTED_ROBOTS = ("cf1", "cf2", "cf3", "cf4")
 TELEMETRY_RESTART_S = 12.0
+HARD_ENABLE_FAILURES = (
+    "locked:",
+    "tumbled:",
+    "crashed:",
+    "hard geofence",
+    "separation violation",
+    "battery below threshold",
+    "raw marker count",
+)
 
 
 @contextmanager
@@ -149,7 +158,9 @@ def _run_sequence(
     accepted_takeoffs: set[str] = set()
     rejected_takeoffs: set[str] = set()
     accepted_landings: set[str] = set()
-    estimator_variances: list[tuple[float, float, float]] = []
+    estimator_variances: dict[
+        str, list[tuple[float, float, float]]
+    ] = {name: [] for name in EXPECTED_ROBOTS}
 
     def event_callback(message) -> None:
         nonlocal safety_action
@@ -169,16 +180,16 @@ def _run_sequence(
             safety_action = True
 
     node.create_subscription(String, "/crazyfly/commands", event_callback, 10)
-    if len(EXPECTED_ROBOTS) == 1:
-        robot = EXPECTED_ROBOTS[0]
-
-        def estimator_callback(message: LogDataGeneric) -> None:
+    for name in EXPECTED_ROBOTS:
+        def estimator_callback(
+            message: LogDataGeneric, robot: str = name
+        ) -> None:
             if len(message.values) >= 3:
-                estimator_variances.append(tuple(message.values[:3]))
+                estimator_variances[robot].append(tuple(message.values[:3]))
 
         node.create_subscription(
             LogDataGeneric,
-            f"/{robot}/estimator_debug",
+            f"/{name}/estimator_debug",
             estimator_callback,
             10,
         )
@@ -204,45 +215,55 @@ def _run_sequence(
             if not client.wait_for_service(timeout_sec=20.0):
                 raise RuntimeError(f"gateway service unavailable: {name}")
 
-        if len(EXPECTED_ROBOTS) == 1:
+        def wait_for_estimators() -> None:
             print(
-                "Waiting for ten stable Kalman variance samples before enable",
+                "Waiting for ten stable Kalman variance samples for: "
+                + ", ".join(EXPECTED_ROBOTS),
                 flush=True,
             )
             estimator_deadline = time.monotonic() + 20.0
-            while not _estimator_variance_stable(estimator_variances):
+            while not all(
+                _estimator_variance_stable(estimator_variances[name])
+                for name in EXPECTED_ROBOTS
+            ):
                 if launch_process.poll() is not None:
                     raise RuntimeError(
                         "ROS launch exited before estimator became stable"
                     )
                 if time.monotonic() >= estimator_deadline:
-                    if len(estimator_variances) < 10:
+                    missing = {
+                        name: len(estimator_variances[name])
+                        for name in EXPECTED_ROBOTS
+                        if len(estimator_variances[name]) < 10
+                    }
+                    if missing:
                         raise RuntimeError(
                             "startup telemetry unavailable: estimator variance "
-                            f"received only {len(estimator_variances)} of 10 samples"
+                            f"samples {missing}; need 10 per robot"
                         )
+                    unstable = [
+                        name
+                        for name in EXPECTED_ROBOTS
+                        if not _estimator_variance_stable(
+                            estimator_variances[name]
+                        )
+                    ]
                     raise RuntimeError(
-                        "Kalman estimator variance did not stabilize within 20 s"
+                        "Kalman estimator variance did not stabilize within "
+                        f"20 s: {unstable}"
                     )
                 rclpy.spin_once(node, timeout_sec=0.10)
             print(
                 "Kalman estimator variance is stable: "
-                f"{estimator_variances[-1]}",
+                + ", ".join(
+                    f"{name}={estimator_variances[name][-1]}"
+                    for name in EXPECTED_ROBOTS
+                ),
                 flush=True,
             )
 
-        hard_failures = (
-            "locked:",
-            "tumbled:",
-            "crashed:",
-            "hard geofence",
-            "separation violation",
-            "battery below threshold",
-            "implausible pose speed",
-            "raw marker count",
-        )
-
         def enable_when_ready() -> None:
+            wait_for_estimators()
             startup_deadline = time.monotonic() + 60.0
             telemetry_restart_deadline = time.monotonic() + TELEMETRY_RESTART_S
             last_reason = ""
@@ -256,7 +277,9 @@ def _run_sequence(
                 if response.success:
                     return
                 last_reason = response.message
-                if any(reason in last_reason for reason in hard_failures):
+                if any(
+                    reason in last_reason for reason in HARD_ENABLE_FAILURES
+                ):
                     raise RuntimeError(f"gateway refused enable: {last_reason}")
                 if (
                     time.monotonic() >= telemetry_restart_deadline
