@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import time
 from functools import partial
 from math import isfinite
-import json
 from pathlib import Path
-import time
 
+import rclpy
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration as DurationMessage
 from crazyflie_interfaces.msg import Status
 from crazyflie_interfaces.srv import Arm, GoTo, Land, Stop, Takeoff
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from motion_capture_tracking_interfaces.msg import NamedPoseArray
-import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import String
@@ -39,8 +39,12 @@ class SafetyGateway(Node):
     def __init__(self) -> None:
         super().__init__("crazyfly_safety_gateway")
         share = Path(get_package_share_directory("crazyfly"))
-        self.declare_parameter("fleet_config_file", str(share / "config" / "crazyflies.yaml"))
-        self.declare_parameter("safety_config_file", str(share / "config" / "safety.yaml"))
+        self.declare_parameter(
+            "fleet_config_file", str(share / "config" / "crazyflies.yaml")
+        )
+        self.declare_parameter(
+            "safety_config_file", str(share / "config" / "safety.yaml")
+        )
         fleet_path = self.get_parameter("fleet_config_file").value
         safety_path = self.get_parameter("safety_config_file").value
         try:
@@ -51,11 +55,16 @@ class SafetyGateway(Node):
 
         self.robot_names = tuple(sorted(self.fleet.enabled))
         self.machine = SafetyMachine(self.safety, self.robot_names)
-        self.last_evaluation = Evaluation(SafetyState.DISABLED, SafetyAction.NONE, (), False)
+        self.last_evaluation = Evaluation(
+            SafetyState.DISABLED, SafetyAction.NONE, (), False
+        )
         self._landing_disarm_at: float | None = None
+        self._landing_robots: set[str] = set()
         self._last_rejection = ""
 
-        self.state_publisher = self.create_publisher(String, "/crazyfly/safety/state", 10)
+        self.state_publisher = self.create_publisher(
+            String, "/crazyfly/safety/state", 10
+        )
         self.command_publisher = self.create_publisher(String, "/crazyfly/commands", 10)
         self.diagnostic_publisher = self.create_publisher(
             DiagnosticArray, "/crazyfly/safety/diagnostics", 10
@@ -99,9 +108,13 @@ class SafetyGateway(Node):
         self.emergency_client = self.create_client(Empty, "/all/emergency")
         self._service_handles.extend(
             [
-                self.create_service(Trigger, "/crazyfly/preflight", self._preflight_callback),
+                self.create_service(
+                    Trigger, "/crazyfly/preflight", self._preflight_callback
+                ),
                 self.create_service(SetBool, "/crazyfly/enable", self._enable_callback),
-                self.create_service(Stop, "/crazyfly/emergency", self._emergency_callback),
+                self.create_service(
+                    Stop, "/crazyfly/emergency", self._emergency_callback
+                ),
             ]
         )
         self.create_timer(0.02, self._timer_callback)
@@ -141,9 +154,12 @@ class SafetyGateway(Node):
         if not request.data:
             self._send_arm(False)
             self._landing_disarm_at = None
+            self._landing_robots.clear()
             self.machine.disable()
             response.success = True
-            self._publish_command("enable", "accepted", details="disabled and disarm requested")
+            self._publish_command(
+                "enable", "accepted", details="disabled and disarm requested"
+            )
             response.message = "flight gateway disabled and disarm requested"
             return response
         success, reasons = self.machine.enable(self._now())
@@ -154,12 +170,15 @@ class SafetyGateway(Node):
             return response
         unavailable = self._unavailable_clients("arm")
         if unavailable:
-            self._reject("enable", f"arm service unavailable for: {', '.join(unavailable)}")
+            self._reject(
+                "enable", f"arm service unavailable for: {', '.join(unavailable)}"
+            )
             self.machine.disable()
             response.success = False
             response.message = f"arm service unavailable for: {', '.join(unavailable)}"
             return response
         self._send_arm(True)
+        self._landing_robots.clear()
         self.last_evaluation = self.machine.evaluate(self._now())
         self._publish_command("enable", "accepted", details="arm requests sent")
         response.message = "preflight passed; arm requests sent"
@@ -183,7 +202,9 @@ class SafetyGateway(Node):
         if not self._forward(name, "takeoff", request):
             return response
         self.machine.mark_flying(name)
-        self._publish_command("takeoff", "accepted", name, f"height={request.height:.3f}")
+        self._publish_command(
+            "takeoff", "accepted", name, f"height={request.height:.3f}"
+        )
         self.get_logger().info(f"accepted takeoff for {name} to {request.height:.2f} m")
         return response
 
@@ -191,14 +212,16 @@ class SafetyGateway(Node):
         self, name: str, request: Land.Request, response: Land.Response
     ) -> Land.Response:
         duration_s = duration_seconds(request.duration)
-        if (
-            not self.machine.operator_enabled
-            or self.machine.state in {SafetyState.DISABLED, SafetyState.EMERGENCY}
-        ):
-            self._reject(f"land/{name}", f"commands are blocked in {self.machine.state.value}")
+        if not self.machine.operator_enabled or self.machine.state in {
+            SafetyState.DISABLED,
+            SafetyState.EMERGENCY,
+        }:
+            self._reject(
+                f"land/{name}", f"commands are blocked in {self.machine.state.value}"
+            )
             return response
-        if self.machine.state is SafetyState.LANDING:
-            self._reject(f"land/{name}", "landing is already in progress")
+        if self.machine.state is SafetyState.LANDING and name in self._landing_robots:
+            self._reject(f"land/{name}", f"landing is already in progress for {name}")
             return response
         if (
             not isfinite(duration_s)
@@ -206,12 +229,21 @@ class SafetyGateway(Node):
             or duration_s <= 0
             or not 0 <= request.height <= 0.10
         ):
-            self._reject(f"land/{name}", "landing height must be 0-0.10 m with positive duration")
+            self._reject(
+                f"land/{name}", "landing height must be 0-0.10 m with positive duration"
+            )
             return response
         if self._forward(name, "land", request):
+            self._landing_robots.add(name)
             self.machine.mark_landing()
-            self._landing_disarm_at = self._now() + duration_s + 0.25
-            self._publish_command("land", "accepted", name, f"height={request.height:.3f}")
+            requested_disarm_at = self._now() + duration_s + 0.25
+            self._landing_disarm_at = max(
+                self._landing_disarm_at or requested_disarm_at,
+                requested_disarm_at,
+            )
+            self._publish_command(
+                "land", "accepted", name, f"height={request.height:.3f}"
+            )
         return response
 
     def _goto_callback(
@@ -250,7 +282,9 @@ class SafetyGateway(Node):
         now = self._now()
         self.last_evaluation = self.machine.evaluate(now)
         if self.last_evaluation.action == SafetyAction.LAND:
-            self._issue_land("; ".join(self.last_evaluation.reasons) or "safety landing")
+            self._issue_land(
+                "; ".join(self.last_evaluation.reasons) or "safety landing"
+            )
         elif self.last_evaluation.action == SafetyAction.EMERGENCY:
             self._issue_emergency("; ".join(self.last_evaluation.reasons))
         if (
@@ -261,6 +295,7 @@ class SafetyGateway(Node):
             self._send_arm(False)
             self.machine.disable()
             self._landing_disarm_at = None
+            self._landing_robots.clear()
         self._publish_health()
 
     def _issue_land(self, reason: str) -> None:
@@ -273,10 +308,12 @@ class SafetyGateway(Node):
         for name in self.robot_names:
             self._forward(name, "land", request)
         self.machine.mark_landing()
+        self._landing_robots = set(self.robot_names)
         self._landing_disarm_at = self._now() + 1.25
 
     def _issue_emergency(self, reason: str) -> None:
         self._landing_disarm_at = None
+        self._landing_robots.clear()
         if self.machine.state != SafetyState.EMERGENCY:
             self.machine.mark_emergency()
         self.get_logger().fatal(f"EMERGENCY STOP: {reason}")
@@ -348,7 +385,9 @@ class SafetyGateway(Node):
         diagnostic.message = self.machine.state.value
         diagnostic.values = [
             KeyValue(key="operator_enabled", value=str(self.machine.operator_enabled)),
-            KeyValue(key="commands_allowed", value=str(self.last_evaluation.commands_allowed)),
+            KeyValue(
+                key="commands_allowed", value=str(self.last_evaluation.commands_allowed)
+            ),
             KeyValue(key="reasons", value=json.dumps(self.last_evaluation.reasons)),
             KeyValue(key="last_rejection", value=self._last_rejection),
         ]
