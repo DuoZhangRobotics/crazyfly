@@ -20,7 +20,11 @@ crazyfly_safety:
   limits:
     maximum_takeoff_height_m: 0.5
     maximum_command_speed_m_s: 0.25
+    maximum_trajectory_acceleration_m_s2: 0.5
+    maximum_trajectory_jerk_m_s3: 2.0
+    maximum_trajectory_duration_s: 60.0
     minimum_separation_m: 0.4
+    trajectory_minimum_separation_m: 0.4
     soft_geofence_margin_m: 0.15
   # A local, reviewed configuration must provide min/max before flight.
   geofence: {}

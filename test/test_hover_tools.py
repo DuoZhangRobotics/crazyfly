@@ -13,6 +13,10 @@ import crazyradio_guard  # noqa: E402
 import fleet_battery  # noqa: E402
 import four_drone_hover  # noqa: E402
 import one_drone_hover  # noqa: E402
+import trajectory_mission  # noqa: E402
+
+from crazyfly.config import load_fleet, load_safety  # noqa: E402
+from crazyfly.trajectory import evaluate_plan, load_trajectory  # noqa: E402
 
 
 def test_crazyradio_holder_parsing_is_pid_only() -> None:
@@ -69,6 +73,65 @@ def test_fleet_battery_hides_only_stale_log_entry_warnings() -> None:
 
     assert not message_filter.filter(stale)
     assert message_filter.filter(useful)
+
+
+def test_trajectory_mission_is_a_hardware_free_dry_run_by_default(capsys) -> None:
+    result = trajectory_mission.main(
+        [str(ROOT / "config" / "trajectories" / "mock_square.yaml"), "--mock"]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "continuously valid" in output
+    assert "DRY RUN" in output
+
+
+def test_legacy_trajectory_option_is_still_accepted(capsys) -> None:
+    result = trajectory_mission.main(
+        [
+            "--trajectory",
+            str(ROOT / "config" / "trajectories" / "mock_square.yaml"),
+            "--mock",
+        ]
+    )
+
+    assert result == 0
+    assert "mock_square" in capsys.readouterr().out
+
+
+def test_trajectory_mission_report_uses_timed_reference() -> None:
+    fleet = load_fleet(ROOT / "config" / "mock_crazyflies.yaml")
+    safety = load_safety(ROOT / "config" / "mock_safety.yaml")
+    plan = load_trajectory(
+        ROOT / "config" / "trajectories" / "mock_square.yaml", fleet, safety
+    )
+    started_at = 100.0
+    samples = [
+        (started_at + elapsed, evaluate_plan(plan, elapsed))
+        for elapsed in (0.0, 4.0, 8.0, 12.0, 16.0)
+    ]
+
+    report = trajectory_mission.mission_report(
+        plan, started_at, samples, {"cf1": 3.9}
+    )
+
+    assert report["tracking_error"]["cf1"]["maximum_m"] == pytest.approx(0.0)
+    assert report["motion_start_skew_s"] == 0.0
+    assert report["battery_minimum_v"] == {"cf1": 3.9}
+
+
+def test_trajectory_mission_rejects_invalid_start_timeout(capsys) -> None:
+    result = trajectory_mission.main(
+        [
+            str(ROOT / "config" / "trajectories" / "mock_square.yaml"),
+            "--mock",
+            "--start-timeout-s",
+            "0",
+        ]
+    )
+
+    assert result == 2
+    assert "positive and finite" in capsys.readouterr().err
 
 
 def test_drone_index_selects_only_matching_fleet_entry(

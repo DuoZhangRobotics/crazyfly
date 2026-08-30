@@ -1,22 +1,19 @@
-version: 1
-steps:
-  - duration_s: 2.0
+version: 2
+name: mock_square
+frame: base
+waypoints:
+  - time_s: 0.0
     goals:
-      cf1:
-        position: [0.2, 0.0, 0.3]
-        yaw_deg: 0.0
-  - duration_s: 2.0
+      cf1: {position: [0.0, 0.0, 0.3], yaw_deg: 0.0}
+  - time_s: 4.0
     goals:
-      cf1:
-        position: [0.2, 0.2, 0.3]
-        yaw_deg: 0.0
-  - duration_s: 2.0
+      cf1: {position: [0.2, 0.0, 0.3], yaw_deg: 0.0}
+  - time_s: 8.0
     goals:
-      cf1:
-        position: [0.0, 0.2, 0.3]
-        yaw_deg: 0.0
-  - duration_s: 2.0
+      cf1: {position: [0.2, 0.2, 0.3], yaw_deg: 0.0}
+  - time_s: 12.0
     goals:
-      cf1:
-        position: [0.0, 0.0, 0.3]
-        yaw_deg: 0.0
+      cf1: {position: [0.0, 0.2, 0.3], yaw_deg: 0.0}
+  - time_s: 16.0
+    goals:
+      cf1: {position: [0.0, 0.0, 0.3], yaw_deg: 0.0}

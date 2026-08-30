@@ -1,0 +1,11 @@
+schema_version: 1
+accepted: true
+frames:
+  base: base
+  mocap: world
+transforms:
+  base_from_mocap:
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]

@@ -19,6 +19,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
 from std_msgs.msg import String
 
 from .config import load_fleet, load_safety, point_in_geofence_frame
@@ -48,6 +49,28 @@ DEBUG_TOPICS = {
         "motor.m4",
     ),
 }
+
+
+def raw_marker_event_data(message: PointCloud2, safety) -> dict[str, object]:
+    count = message.width * message.height
+    data: dict[str, object] = {
+        "source_frame": message.header.frame_id,
+        "frame": safety.geofence_frame,
+        "count": count,
+    }
+    expected = safety.expected_raw_marker_count
+    if expected is not None and count != expected:
+        markers = point_cloud2.read_points_list(
+            message,
+            field_names=["x", "y", "z"],
+            skip_nans=True,
+        )
+        data["valid_position_count"] = len(markers)
+        data["positions"] = [
+            point_in_geofence_frame((marker.x, marker.y, marker.z), safety)
+            for marker in markers
+        ]
+    return data
 
 
 class ExperimentLogger(Node):
@@ -220,13 +243,7 @@ class ExperimentLogger(Node):
         )
 
     def _point_cloud_callback(self, message: PointCloud2) -> None:
-        self._write(
-            "raw_marker_count",
-            {
-                "source_frame": message.header.frame_id,
-                "count": message.width * message.height,
-            },
-        )
+        self._write("raw_marker_count", raw_marker_event_data(message, self.safety))
 
     def _onboard_pose_callback(self, name: str, message: PoseStamped) -> None:
         position = message.pose.position

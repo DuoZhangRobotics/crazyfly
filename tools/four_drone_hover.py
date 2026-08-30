@@ -17,7 +17,10 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import yaml
-from crazyradio_guard import describe_status, ensure_crazyradio_free
+try:
+    from .crazyradio_guard import describe_status, ensure_crazyradio_free
+except ImportError:  # Direct execution from the tools directory.
+    from crazyradio_guard import describe_status, ensure_crazyradio_free
 
 from crazyfly.config import (
     ConfigError,

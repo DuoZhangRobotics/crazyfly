@@ -1,0 +1,10 @@
+version: 2
+name: mock_line
+frame: base
+waypoints:
+  - time_s: 0.0
+    goals:
+      cf1: {position: [0.0, 0.0, 0.3], yaw_deg: 0.0}
+  - time_s: 3.0
+    goals:
+      cf1: {position: [0.1, 0.0, 0.3], yaw_deg: 0.0}

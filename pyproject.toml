@@ -1,14 +1,4 @@
-# ROS package metadata remains in setup.py/package.xml. uv owns the isolated
-# Python runtime while ROS packages remain available read-only from the host.
-[project]
-name = "crazyfly-tools"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = [
-    "cflib==0.1.33",
-    "pyyaml>=6.0",
-]
-
+# ROS package metadata remains exclusively in setup.py/package.xml.
 [tool.uv]
 package = false
 

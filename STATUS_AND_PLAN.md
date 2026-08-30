@@ -26,6 +26,10 @@ loss. Four-aircraft execution defaults to staged one-at-a-time takeoffs, and
 physical launches automatically preserve base-frame telemetry. Synchronized
 takeoff requires an additional explicit flag.
 
+Experiment logs preserve all raw marker coordinates in UR `base` whenever the
+observed marker count differs from the reviewed expected count, allowing an
+extra reflection or missing reconstruction to be localized after a run.
+
 The synchronized hover and the all-four staged sequence have subsequently
 passed. Atomic coordinated movement is implemented with two modes: an 8 cm
 formation translation-and-return and a four-step cyclic position permutation.
@@ -40,8 +44,21 @@ least 30.7 cm. All four landings and disarms completed with no safety event.
 The first attempt exposed and safely stopped on a battery-warning logic error:
 the warning threshold had blocked a new motion command after takeoff. Battery
 warning is now a preflight gate only; the configured critical threshold remains
-the in-flight controlled-landing threshold. The cyclic permutation remains the
-next physical movement test.
+the in-flight controlled-landing threshold.
+
+The four-step cyclic permutation also passed after restoring each physical
+radio to its configured single-marker table position. It exposed the restart
+identity constraint: after an interrupted permutation, restarting the tracker
+without restoring physical 01-04 causes marker names to be reassigned by
+location. Successful missions therefore return to captured launch positions,
+and incomplete mission logs require an identity recheck.
+
+Version-2 timed trajectory missions are implemented. Shared-time UR-base
+waypoints compile to continuously validated degree-7 minimum-snap polynomials,
+upload while disarmed, move atomically to their starting points, broadcast one
+absolute start, report tracking metrics, return to launch, and land. Automatic
+and external Trigger start modes both pass complete hardware-free executions.
+No polynomial mission has been flown physically yet.
 
 ## 2. Installed environment
 
@@ -102,6 +119,10 @@ Public project interfaces:
 - `/crazyfly/<robot>/takeoff`
 - `/crazyfly/<robot>/land`
 - `/crazyfly/<robot>/go_to`
+- `/crazyfly/batch_go_to_requests`
+- `/crazyfly/trajectory_upload_requests`
+- `/crazyfly/trajectory_start_requests`
+- `/crazyfly/mission/start` (available while a mission waits externally)
 - `/crazyfly/commands`
 - `/crazyfly/safety/state`
 - `/crazyfly/safety/diagnostics`
@@ -239,6 +260,16 @@ Add one aircraft at a time. Require a unique URI, current firmware, correct
 single-marker identity, healthy battery, stable simultaneous links, and
 sequential takeoff/landing before synchronized trajectories. Begin well above
 0.40 m separation and commands no faster than 0.25 m/s.
+
+### Stage F: onboard polynomial trajectories
+
+1. Run the short version-2 polynomial with one drone and review continuous
+   tracking error.
+2. Require mean error at most 3 cm and maximum error at most 8 cm.
+3. Dry-run and review `four_drone_box.yaml`, then repeat it three times with
+   measured separation at least 20 cm and no safety event.
+4. Repeat with the powered UR5e stationary outside the reviewed flight paths.
+5. Only then add an RTDE coordinator that releases `/crazyfly/mission/start`.
 
 ## 8. Non-negotiable constraints
 

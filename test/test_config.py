@@ -17,6 +17,14 @@ from crazyfly.config_validator import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _mock_safety_source():
+    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source["crazyfly_safety"]["geofence"]["transform_file"] = str(
+        ROOT / "config" / "mock_base_from_world.yaml"
+    )
+    return source
+
+
 def test_hardware_defaults_cannot_fly() -> None:
     fleet = load_fleet(ROOT / "config" / "crazyflies.yaml")
     safety = load_safety(ROOT / "config" / "safety.yaml")
@@ -160,7 +168,7 @@ def test_duplicate_radio_uri_is_rejected(tmp_path: Path) -> None:
 
 
 def test_flight_enabled_without_geofence_is_rejected(tmp_path: Path) -> None:
-    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source = _mock_safety_source()
     source["crazyfly_safety"]["geofence"] = {}
     path = tmp_path / "unbounded.yaml"
     path.write_text(yaml.safe_dump(source))
@@ -180,7 +188,7 @@ def test_quoted_enabled_boolean_is_rejected(tmp_path: Path) -> None:
 
 
 def test_non_finite_safety_limit_is_rejected(tmp_path: Path) -> None:
-    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source = _mock_safety_source()
     source["crazyfly_safety"]["limits"]["maximum_command_speed_m_s"] = float("nan")
     path = tmp_path / "nan_limit.yaml"
     path.write_text(yaml.safe_dump(source))
@@ -190,7 +198,7 @@ def test_non_finite_safety_limit_is_rejected(tmp_path: Path) -> None:
 
 
 def test_invalid_raw_marker_count_is_rejected(tmp_path: Path) -> None:
-    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source = _mock_safety_source()
     source["crazyfly_safety"]["tracking"]["expected_raw_marker_count"] = 0
     path = tmp_path / "bad_marker_count.yaml"
     path.write_text(yaml.safe_dump(source))
@@ -200,7 +208,7 @@ def test_invalid_raw_marker_count_is_rejected(tmp_path: Path) -> None:
 
 
 def test_identity_timeout_cannot_precede_pose_rejection(tmp_path: Path) -> None:
-    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source = _mock_safety_source()
     source["crazyfly_safety"]["tracking"]["pose_identity_emergency_s"] = 0.05
     path = tmp_path / "bad_identity_timeout.yaml"
     path.write_text(yaml.safe_dump(source))
@@ -210,12 +218,24 @@ def test_identity_timeout_cannot_precede_pose_rejection(tmp_path: Path) -> None:
 
 
 def test_invalid_pose_speed_action_is_rejected(tmp_path: Path) -> None:
-    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source = _mock_safety_source()
     source["crazyfly_safety"]["tracking"]["pose_speed_action"] = "ignore"
     path = tmp_path / "bad_pose_speed_action.yaml"
     path.write_text(yaml.safe_dump(source))
 
     with pytest.raises(ConfigError, match="land or emergency"):
+        load_safety(path)
+
+
+def test_trajectory_separation_cannot_be_below_live_limit(tmp_path: Path) -> None:
+    source = _mock_safety_source()
+    source["crazyfly_safety"]["limits"][
+        "trajectory_minimum_separation_m"
+    ] = 0.2
+    path = tmp_path / "unsafe_trajectory_separation.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="must not be below"):
         load_safety(path)
 
 

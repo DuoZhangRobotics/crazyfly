@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 from crazyfly.config import load_safety
 from crazyfly.safety import Evaluation, SafetyAction, SafetyState
-from crazyfly.safety_gateway import SafetyGateway, duration_message
+from crazyfly.safety_gateway import (
+    PreparedTrajectory,
+    SafetyGateway,
+    duration_message,
+)
+from crazyfly.trajectory import load_trajectory, trajectory_payload
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,11 +93,35 @@ class _BatchClient:
         self.requests.append(request)
 
 
+class _Future:
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+
+    def done(self) -> bool:
+        return True
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace()
+
+
+class _TrajectoryClient(_BatchClient):
+    def __init__(self, ready: bool = True, error: Exception | None = None):
+        super().__init__(ready)
+        self.error = error
+
+    def call_async(self, request):
+        self.requests.append(request)
+        return _Future(self.error)
+
+
 def _batch_gateway(*, second_ready: bool = True):
     gateway = object.__new__(SafetyGateway)
     gateway.safety = load_safety(ROOT / "config" / "mock_safety.yaml")
     gateway.robot_names = ("cf1", "cf2")
     gateway._batch_end_at = None
+    gateway._trajectory_end_at = None
     gateway._now = lambda: 10.0
     gateway.last_evaluation = Evaluation(
         SafetyState.FLYING, SafetyAction.NONE, (), True
@@ -127,7 +156,7 @@ def _batch_message():
         data=json.dumps(
             {
                 "batch_id": "test-1",
-                "frame": "world",
+                "frame": "base",
                 "duration_s": 2.0,
                 "yaw_rad": 0.0,
                 "goals": {
@@ -159,3 +188,156 @@ def test_batch_go_to_dispatches_none_if_any_service_is_unavailable() -> None:
     assert second.requests == []
     assert gateway._batch_end_at is None
     assert gateway.events[-1][0][:2] == ("batch_go_to", "rejected")
+
+
+def _trajectory_gateway(*, upload_error: Exception | None = None):
+    gateway = object.__new__(SafetyGateway)
+    gateway.safety = load_safety(ROOT / "config" / "mock_safety.yaml")
+    gateway.robot_names = ("cf1",)
+    gateway.machine = SimpleNamespace(
+        state=SafetyState.DISABLED,
+        operator_enabled=False,
+        health={"cf1": SimpleNamespace(position=(0.0, 0.0, 0.3))},
+    )
+    gateway.last_evaluation = Evaluation(
+        SafetyState.DISABLED, SafetyAction.NONE, (), False
+    )
+    gateway._trajectory_upload_pending = None
+    gateway._prepared_trajectory = None
+    gateway._trajectory_end_at = None
+    gateway._trajectory_started = False
+    gateway._batch_end_at = None
+    gateway._last_rejection = ""
+    gateway._now = lambda: 10.0
+    upload = _TrajectoryClient(error=upload_error)
+    gateway.upstream_clients = {"cf1": {"upload_trajectory": upload}}
+    gateway.start_trajectory_client = _TrajectoryClient()
+    gateway.events = []
+    gateway._publish_command = lambda *args, **kwargs: gateway.events.append(
+        (args, kwargs)
+    )
+    gateway.get_logger = lambda: SimpleNamespace(
+        info=lambda _message: None,
+        warning=lambda _message: None,
+    )
+    fleet = __import__("crazyfly.config", fromlist=["load_fleet"]).load_fleet(
+        ROOT / "config" / "mock_crazyflies.yaml"
+    )
+    plan = load_trajectory(
+        ROOT / "config" / "trajectories" / "mock_square.yaml",
+        fleet,
+        gateway.safety,
+    )
+    payload = trajectory_payload(plan, mission_id="mission-1", trajectory_id=3)
+    message = SimpleNamespace(data=json.dumps(payload))
+    return gateway, upload, plan, message
+
+
+def test_trajectory_upload_is_prepared_only_after_all_futures_finish() -> None:
+    gateway, upload, plan, message = _trajectory_gateway()
+
+    gateway._trajectory_upload_callback(message)
+
+    assert len(upload.requests) == 1
+    assert gateway._prepared_trajectory is None
+    assert gateway.events[-1][0][:2] == ("trajectory_upload", "pending")
+
+    gateway._poll_trajectory_upload()
+
+    assert gateway._prepared_trajectory is not None
+    assert gateway._prepared_trajectory.mission_id == "mission-1"
+    assert gateway._prepared_trajectory.trajectory_id == 3
+    assert gateway._prepared_trajectory.plan.trajectories == plan.trajectories
+    assert gateway.events[-1][0][:2] == ("trajectory_upload", "accepted")
+    request = upload.requests[0]
+    assert request.trajectory_id == 3
+    assert request.piece_offset == 0
+    assert len(request.pieces) == 4
+
+
+def test_failed_trajectory_upload_never_becomes_startable() -> None:
+    gateway, upload, _plan, message = _trajectory_gateway(
+        upload_error=RuntimeError("upload failed")
+    )
+
+    gateway._trajectory_upload_callback(message)
+    gateway._poll_trajectory_upload()
+
+    assert len(upload.requests) == 1
+    assert gateway._prepared_trajectory is None
+    assert gateway.events[-1][0][:2] == ("trajectory_upload", "rejected")
+
+
+def test_trajectory_upload_requires_disarmed_state_and_ready_services() -> None:
+    gateway, upload, _plan, message = _trajectory_gateway()
+    gateway.machine.operator_enabled = True
+    gateway.machine.state = SafetyState.READY
+
+    gateway._trajectory_upload_callback(message)
+
+    assert upload.requests == []
+    assert "requires disarmed" in gateway._last_rejection
+
+    gateway.machine.operator_enabled = False
+    gateway.machine.state = SafetyState.DISABLED
+    upload.ready = False
+    gateway._trajectory_upload_callback(message)
+    assert upload.requests == []
+    assert "unavailable" in gateway._last_rejection
+
+
+def _start_message(mission_id="mission-1", trajectory_id=3):
+    return SimpleNamespace(
+        data=json.dumps(
+            {
+                "mission_id": mission_id,
+                "trajectory_id": trajectory_id,
+                "timescale": 1.0,
+            }
+        )
+    )
+
+
+def test_trajectory_start_requires_matching_prepared_mission_and_position() -> None:
+    gateway, _upload, plan, _message = _trajectory_gateway()
+    gateway._prepared_trajectory = PreparedTrajectory("mission-1", 3, plan)
+    gateway.machine.state = SafetyState.FLYING
+    gateway.machine.operator_enabled = True
+    gateway.machine.health["cf1"].position = plan.start_positions["cf1"]
+    gateway.last_evaluation = Evaluation(
+        SafetyState.FLYING, SafetyAction.NONE, (), True
+    )
+
+    gateway._trajectory_start_callback(_start_message())
+
+    assert len(gateway.start_trajectory_client.requests) == 1
+    request = gateway.start_trajectory_client.requests[0]
+    assert not request.relative
+    assert not request.reversed
+    assert request.timescale == 1.0
+    assert gateway._trajectory_started
+    assert gateway._trajectory_end_at == 10.0 + plan.duration_s
+    assert gateway.events[-1][0][:2] == ("trajectory_start", "accepted")
+
+    gateway._trajectory_start_callback(_start_message())
+    assert len(gateway.start_trajectory_client.requests) == 1
+    assert gateway.events[-1][0][:2] == ("trajectory_start", "rejected")
+
+
+def test_trajectory_start_rejects_wrong_id_and_unsettled_start() -> None:
+    gateway, _upload, plan, _message = _trajectory_gateway()
+    gateway._prepared_trajectory = PreparedTrajectory("mission-1", 3, plan)
+    gateway.machine.state = SafetyState.FLYING
+    gateway.machine.operator_enabled = True
+    gateway.last_evaluation = Evaluation(
+        SafetyState.FLYING, SafetyAction.NONE, (), True
+    )
+
+    gateway._trajectory_start_callback(_start_message(trajectory_id=4))
+    assert gateway.start_trajectory_client.requests == []
+    assert "mismatch" in gateway._last_rejection
+
+    gateway.machine.health["cf1"].position = (0.2, 0.0, 0.3)
+    gateway._trajectory_start_callback(_start_message())
+    assert gateway.start_trajectory_client.requests == []
+    assert "not settled" in gateway._last_rejection

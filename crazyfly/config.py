@@ -66,7 +66,11 @@ class SafetyConfig:
     battery_critical_v: float
     maximum_takeoff_height_m: float
     maximum_command_speed_m_s: float
+    maximum_trajectory_acceleration_m_s2: float
+    maximum_trajectory_jerk_m_s3: float
+    maximum_trajectory_duration_s: float
     minimum_separation_m: float
+    trajectory_minimum_separation_m: float
     soft_geofence_margin_m: float
     geofence_frame: str
     geofence_from_world: Matrix4 | None
@@ -316,9 +320,28 @@ def load_safety(path: str | Path) -> SafetyConfig:
             limits.get("maximum_command_speed_m_s", 0.25),
             "limits.maximum_command_speed_m_s",
         ),
+        maximum_trajectory_acceleration_m_s2=_finite_number(
+            limits.get("maximum_trajectory_acceleration_m_s2", 0.5),
+            "limits.maximum_trajectory_acceleration_m_s2",
+        ),
+        maximum_trajectory_jerk_m_s3=_finite_number(
+            limits.get("maximum_trajectory_jerk_m_s3", 2.0),
+            "limits.maximum_trajectory_jerk_m_s3",
+        ),
+        maximum_trajectory_duration_s=_finite_number(
+            limits.get("maximum_trajectory_duration_s", 60.0),
+            "limits.maximum_trajectory_duration_s",
+        ),
         minimum_separation_m=_finite_number(
             limits.get("minimum_separation_m", 0.4),
             "limits.minimum_separation_m",
+        ),
+        trajectory_minimum_separation_m=_finite_number(
+            limits.get(
+                "trajectory_minimum_separation_m",
+                limits.get("minimum_separation_m", 0.4),
+            ),
+            "limits.trajectory_minimum_separation_m",
         ),
         soft_geofence_margin_m=_finite_number(
             limits.get("soft_geofence_margin_m", 0.15),
@@ -355,11 +378,19 @@ def load_safety(path: str | Path) -> SafetyConfig:
             config.marker_count_grace_s,
             config.maximum_takeoff_height_m,
             config.maximum_command_speed_m_s,
+            config.maximum_trajectory_acceleration_m_s2,
+            config.maximum_trajectory_jerk_m_s3,
+            config.maximum_trajectory_duration_s,
             config.minimum_separation_m,
+            config.trajectory_minimum_separation_m,
         )
         <= 0
     ):
         raise ConfigError("safety timeouts and limits must be positive")
+    if config.trajectory_minimum_separation_m < config.minimum_separation_m:
+        raise ConfigError(
+            "trajectory minimum separation must not be below the live minimum"
+        )
     if (
         config.maximum_pose_speed_m_s is not None
         and config.maximum_pose_speed_m_s <= 0

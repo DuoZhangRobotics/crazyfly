@@ -1,0 +1,3 @@
+# Install only into /home/duo/crazyfly/.venv with uv; never into system Python.
+cflib==0.1.33
+pyyaml==6.0.3

@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from crazyflie_interfaces.msg import Status
-from crazyflie_interfaces.srv import Arm, GoTo, Land, Takeoff
+from crazyflie_interfaces.srv import (
+    Arm,
+    GoTo,
+    Land,
+    StartTrajectory,
+    Takeoff,
+    UploadTrajectory,
+)
 from geometry_msgs.msg import PoseStamped
 from motion_capture_tracking_interfaces.msg import NamedPose, NamedPoseArray
 import rclpy
@@ -19,6 +27,7 @@ from std_srvs.srv import Empty, SetBool
 
 from .config import load_fleet
 from .safety import CAN_BE_ARMED, CAN_FLY, IS_ARMED, IS_FLYING, IS_TUMBLED
+from .trajectory import evaluate_coefficients
 
 
 @dataclass
@@ -28,6 +37,9 @@ class MockRobot:
     armed: bool = False
     flying: bool = False
     tumbled: bool = False
+    trajectories: dict[int, list[object]] = field(default_factory=dict)
+    active_trajectory_id: int | None = None
+    trajectory_started_at: float | None = None
 
 
 class MockStack(Node):
@@ -57,6 +69,11 @@ class MockStack(Node):
         }
         self._services: list[object] = [
             self.create_service(Empty, "/all/emergency", self._emergency_callback),
+            self.create_service(
+                StartTrajectory,
+                "/all/start_trajectory",
+                self._start_trajectory_callback,
+            ),
             self.create_service(SetBool, "/mock/drop_tracking", self._drop_tracking_callback),
             self.create_service(SetBool, "/mock/tumble", self._tumble_callback),
         ]
@@ -69,6 +86,11 @@ class MockStack(Node):
                     ),
                     self.create_service(Land, f"/{name}/land", partial(self._land_callback, name)),
                     self.create_service(GoTo, f"/{name}/go_to", partial(self._goto_callback, name)),
+                    self.create_service(
+                        UploadTrajectory,
+                        f"/{name}/upload_trajectory",
+                        partial(self._upload_trajectory_callback, name),
+                    ),
                 ]
             )
         self.create_timer(0.01, self._publish_poses)
@@ -78,6 +100,7 @@ class MockStack(Node):
     def _publish_poses(self) -> None:
         if self.drop_tracking:
             return
+        self._update_trajectories()
         message = NamedPoseArray()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = "world"
@@ -121,6 +144,8 @@ class MockStack(Node):
         self.robots[name].armed = request.arm
         if not request.arm:
             self.robots[name].flying = False
+            self.robots[name].active_trajectory_id = None
+            self.robots[name].trajectory_started_at = None
         return response
 
     def _takeoff_callback(
@@ -138,6 +163,8 @@ class MockStack(Node):
         robot = self.robots[name]
         robot.position[2] = float(request.height)
         robot.flying = False
+        robot.active_trajectory_id = None
+        robot.trajectory_started_at = None
         return response
 
     def _goto_callback(
@@ -150,12 +177,75 @@ class MockStack(Node):
         robot.position[:] = target
         return response
 
+    def _upload_trajectory_callback(
+        self,
+        name: str,
+        request: UploadTrajectory.Request,
+        response: UploadTrajectory.Response,
+    ) -> UploadTrajectory.Response:
+        self.robots[name].trajectories[int(request.trajectory_id)] = list(request.pieces)
+        return response
+
+    def _start_trajectory_callback(
+        self,
+        request: StartTrajectory.Request,
+        response: StartTrajectory.Response,
+    ) -> StartTrajectory.Response:
+        started_at = time.monotonic()
+        for robot in self.robots.values():
+            trajectory_id = int(request.trajectory_id)
+            if trajectory_id in robot.trajectories:
+                robot.active_trajectory_id = trajectory_id
+                robot.trajectory_started_at = started_at
+        return response
+
+    @staticmethod
+    def _duration_seconds(message) -> float:
+        return float(message.sec) + float(message.nanosec) / 1_000_000_000.0
+
+    def _update_trajectories(self) -> None:
+        now = time.monotonic()
+        for robot in self.robots.values():
+            if (
+                robot.active_trajectory_id is None
+                or robot.trajectory_started_at is None
+            ):
+                continue
+            pieces = robot.trajectories[robot.active_trajectory_id]
+            elapsed = max(0.0, now - robot.trajectory_started_at)
+            total_duration = sum(
+                self._duration_seconds(piece.duration) for piece in pieces
+            )
+            selected = pieces[-1]
+            local_time = self._duration_seconds(selected.duration)
+            remaining = elapsed
+            for piece in pieces:
+                duration_s = self._duration_seconds(piece.duration)
+                if remaining <= duration_s:
+                    selected = piece
+                    local_time = remaining
+                    break
+                remaining -= duration_s
+            robot.position[:] = [
+                evaluate_coefficients(coefficients, local_time)
+                for coefficients in (
+                    selected.poly_x,
+                    selected.poly_y,
+                    selected.poly_z,
+                )
+            ]
+            if elapsed >= total_duration:
+                robot.active_trajectory_id = None
+                robot.trajectory_started_at = None
+
     def _emergency_callback(
         self, _request: Empty.Request, response: Empty.Response
     ) -> Empty.Response:
         for robot in self.robots.values():
             robot.armed = False
             robot.flying = False
+            robot.active_trajectory_id = None
+            robot.trajectory_started_at = None
         return response
 
     def _drop_tracking_callback(

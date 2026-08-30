@@ -82,7 +82,13 @@ Read the resting battery voltage of every enabled drone with one safe command:
 
 The command reads the configured radio addresses sequentially, never arms a
 drone, reports offline aircraft without hiding the others, and uses the warning
-and critical thresholds from the reviewed local safety profile.
+and critical thresholds from the reviewed local safety profile. Its dedicated
+environment can be reproduced without touching system Python using:
+
+```sh
+uv pip install --python /home/duo/crazyfly/.venv/bin/python \
+  -r /home/duo/crazyfly/tools/battery-requirements.txt
+```
 
 The helper activates `/home/duo/ros2_ws/.venv` and routes `colcon` through that
 interpreter, ensuring rebuilt project executables keep a virtual-environment
@@ -146,17 +152,55 @@ ros2 service call /mock/drop_tracking std_srvs/srv/SetBool '{data: false}'
 ros2 service call /crazyfly/enable std_srvs/srv/SetBool '{data: false}'
 ```
 
-Validate the example trajectory without sending commands:
+Compile and continuously validate the version-2 timed waypoint example without
+starting ROS or sending commands:
 
 ```sh
-ros2 run crazyfly crazyfly_trajectory \
-  --fleet config/mock_crazyflies.yaml \
-  --safety config/mock_safety.yaml \
-  --trajectory config/trajectories/mock_square.yaml
+python tools/trajectory_mission.py config/trajectories/mock_square.yaml --mock
 ```
 
-Execution requires the separately running and enabled mock gateway plus the
-explicit `--execute` flag.
+Run the complete takeoff, preposition, onboard polynomial, return, and landing
+against the hardware-free mock stack:
+
+```sh
+python tools/trajectory_mission.py config/trajectories/mock_square.yaml \
+  --mock --execute
+```
+
+The installed `crazyfly_trajectory` and `crazyfly_trajectory_mission` commands
+are aliases for the same CLI. The legacy `--trajectory FILE` spelling remains
+accepted.
+
+Version-2 files use shared absolute times and UR-base goals for every enabled
+drone. The compiler creates degree-7 minimum-snap pieces with zero endpoint
+velocity, acceleration, and jerk and continuous derivatives through fly-through
+waypoints. Yaw must remain zero while single-marker tracking is used.
+
+The gateway re-parses and continuously validates the compiled polynomials before
+uploading them. The configured limits are 0.25 m/s speed, 0.50 m/s² acceleration,
+2.0 m/s³ jerk, 60 seconds duration, the soft geofence, and a 0.25 m planned
+separation for the local four-drone profile. Position extrema and pairwise
+separation are checked between waypoints as well as at them.
+
+For a future arm coordinator, prepare a mission with:
+
+```sh
+python tools/trajectory_mission.py TRAJECTORY.yaml --execute --wait-for-start
+```
+
+After `mission_ready`, release it from another activated process with:
+
+```sh
+ros2 service call /crazyfly/mission/start std_srvs/srv/Trigger '{}'
+```
+
+The mission waits at the trajectory starts, broadcasts one absolute
+`/all/start_trajectory` only after the Trigger, then returns every drone to its
+captured launch position before landing. The conservative reviewed four-drone
+dry-run example is `config/trajectories/four_drone_box.yaml`: it first assembles
+a 35 cm-spaced line, executes a smooth 4 cm box as a formation, returns to the
+line, then returns to launch. It must not be executed until the one-drone
+polynomial rollout passes.
 
 ## OptiTrack-only workflow
 
@@ -263,10 +307,21 @@ geofence and speed limits, computes exact continuous pairwise separation for
 all linear paths, checks every upstream service, and only then dispatches the
 full batch. Every step verifies that all drones settled within 8 cm.
 
+Polynomial missions use `/crazyfly/trajectory_upload_requests` and
+`/crazyfly/trajectory_start_requests`. Upload is permitted only while disarmed;
+the gateway prepares a mission only after every per-drone upload future
+completes. Start requires a matching mission ID, a flying/healthy gateway, and
+every drone within 5 cm of its compiled starting point.
+
 ## Experiment logging
 
 The logger writes newline-delimited pose, status, safety, diagnostic, and command
 events. Its manifest records absolute configuration paths and SHA-256 hashes.
+Raw point-cloud events normally store only the marker count. Whenever that count
+differs from the reviewed expected count, the event also stores every valid raw
+marker position transformed from Motive `world` into the configured UR `base`
+frame. This makes intermittent reflections spatially diagnosable without
+inflating every normal frame.
 Rosbag recording is optional and is refused when less than 1 GB is free:
 
 ```sh
@@ -285,3 +340,6 @@ Physical swarm launches start this bounded logger automatically. Named mocap
 positions, onboard position estimates, raw marker counts, safety state, status,
 and command events are preserved under `experiments/`. Positions are converted
 to the configured geofence frame, which is `base` in the local UR5e profile.
+Mission events preserve the trajectory path and SHA-256, readiness/start times,
+completion or identity-recheck status, mean/RMS/95th-percentile/maximum tracking
+error, measured separation, battery minima, and inferred motion-start skew.

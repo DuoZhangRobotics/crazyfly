@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import asdict, dataclass
 from functools import partial
-from math import isfinite
+from math import dist, isfinite
 from pathlib import Path
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration as DurationMessage
-from crazyflie_interfaces.msg import Status
-from crazyflie_interfaces.srv import Arm, GoTo, Land, Stop, Takeoff
+from crazyflie_interfaces.msg import Status, TrajectoryPolynomialPiece
+from crazyflie_interfaces.srv import (
+    Arm,
+    GoTo,
+    Land,
+    StartTrajectory,
+    Stop,
+    Takeoff,
+    UploadTrajectory,
+)
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from motion_capture_tracking_interfaces.msg import NamedPoseArray
 from rclpy.node import Node
@@ -26,8 +35,29 @@ from .config import (
     load_fleet,
     load_safety,
     point_from_geofence_frame,
+    point_in_geofence_frame,
 )
 from .safety import Evaluation, SafetyAction, SafetyMachine, SafetyState
+from .trajectory import (
+    TrajectoryPlan,
+    trajectory_from_payload,
+    trajectory_in_world,
+)
+
+
+@dataclass
+class PendingTrajectoryUpload:
+    mission_id: str
+    trajectory_id: int
+    plan: TrajectoryPlan
+    futures: list[object]
+
+
+@dataclass(frozen=True)
+class PreparedTrajectory:
+    mission_id: str
+    trajectory_id: int
+    plan: TrajectoryPlan
 
 
 def duration_seconds(message: DurationMessage) -> float:
@@ -67,6 +97,10 @@ class SafetyGateway(Node):
         self._landing_disarm_at: float | None = None
         self._landing_robots: set[str] = set()
         self._batch_end_at: float | None = None
+        self._trajectory_upload_pending: PendingTrajectoryUpload | None = None
+        self._prepared_trajectory: PreparedTrajectory | None = None
+        self._trajectory_end_at: float | None = None
+        self._trajectory_started = False
         self._last_rejection = ""
 
         self.state_publisher = self.create_publisher(
@@ -91,6 +125,18 @@ class SafetyGateway(Node):
             self._batch_goto_callback,
             10,
         )
+        self.create_subscription(
+            String,
+            "/crazyfly/trajectory_upload_requests",
+            self._trajectory_upload_callback,
+            10,
+        )
+        self.create_subscription(
+            String,
+            "/crazyfly/trajectory_start_requests",
+            self._trajectory_start_callback,
+            10,
+        )
 
         self.upstream_clients: dict[str, dict[str, object]] = {}
         self._service_handles: list[object] = []
@@ -103,6 +149,9 @@ class SafetyGateway(Node):
                 "takeoff": self.create_client(Takeoff, f"/{name}/takeoff"),
                 "land": self.create_client(Land, f"/{name}/land"),
                 "go_to": self.create_client(GoTo, f"/{name}/go_to"),
+                "upload_trajectory": self.create_client(
+                    UploadTrajectory, f"/{name}/upload_trajectory"
+                ),
             }
             self._service_handles.extend(
                 [
@@ -125,6 +174,9 @@ class SafetyGateway(Node):
             )
 
         self.emergency_client = self.create_client(Empty, "/all/emergency")
+        self.start_trajectory_client = self.create_client(
+            StartTrajectory, "/all/start_trajectory"
+        )
         self._service_handles.extend(
             [
                 self.create_service(
@@ -178,6 +230,7 @@ class SafetyGateway(Node):
             self._landing_disarm_at = None
             self._landing_robots.clear()
             self._batch_end_at = None
+            self._clear_trajectory_state()
             self.machine.disable()
             response.success = True
             self._publish_command(
@@ -275,6 +328,12 @@ class SafetyGateway(Node):
         if self._batch_end_at is not None and self._now() < self._batch_end_at:
             self._reject(f"go_to/{name}", "coordinated motion is in progress")
             return response
+        if (
+            self._trajectory_end_at is not None
+            and self._now() < self._trajectory_end_at
+        ):
+            self._reject(f"go_to/{name}", "trajectory motion is in progress")
+            return response
         goal = (request.goal.x, request.goal.y, request.goal.z)
         if not self.last_evaluation.commands_allowed:
             reason = "; ".join(self.last_evaluation.reasons) or (
@@ -342,6 +401,9 @@ class SafetyGateway(Node):
             return
 
         now = self._now()
+        if self._trajectory_end_at is not None and now < self._trajectory_end_at:
+            self._reject_batch(batch_id, "trajectory motion is in progress")
+            return
         if self._batch_end_at is not None and now < self._batch_end_at:
             self._reject_batch(batch_id, "coordinated motion is already in progress")
             return
@@ -398,6 +460,230 @@ class SafetyGateway(Node):
             f"(minimum separation {minimum:.3f} m)"
         )
 
+    @staticmethod
+    def _trajectory_piece_message(piece) -> TrajectoryPolynomialPiece:
+        message = TrajectoryPolynomialPiece()
+        message.duration = duration_message(piece.duration_s)
+        message.poly_x = list(piece.poly_x)
+        message.poly_y = list(piece.poly_y)
+        message.poly_z = list(piece.poly_z)
+        message.poly_yaw = list(piece.poly_yaw)
+        return message
+
+    def _trajectory_upload_callback(self, message: String) -> None:
+        mission_id = "invalid"
+        try:
+            payload = json.loads(message.data)
+            if not isinstance(payload, dict):
+                raise ConfigError("trajectory upload must be a JSON object")
+            raw_mission_id = payload.get("mission_id")
+            if isinstance(raw_mission_id, str):
+                mission_id = raw_mission_id
+            mission_id, trajectory_id, plan = trajectory_from_payload(
+                payload, self.robot_names, self.safety
+            )
+        except (ConfigError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._reject_trajectory("trajectory_upload", mission_id, str(exc))
+            return
+        if self.machine.operator_enabled or self.machine.state in {
+            SafetyState.FLYING,
+            SafetyState.LANDING,
+            SafetyState.EMERGENCY,
+        }:
+            self._reject_trajectory(
+                "trajectory_upload", mission_id, "trajectory upload requires disarmed state"
+            )
+            return
+        if self._trajectory_upload_pending is not None:
+            self._reject_trajectory(
+                "trajectory_upload", mission_id, "another trajectory upload is pending"
+            )
+            return
+        if self._prepared_trajectory is not None:
+            self._reject_trajectory(
+                "trajectory_upload", mission_id, "a trajectory is already prepared"
+            )
+            return
+        unavailable = self._unavailable_clients("upload_trajectory")
+        if unavailable:
+            self._reject_trajectory(
+                "trajectory_upload",
+                mission_id,
+                f"upload service unavailable for: {', '.join(unavailable)}",
+            )
+            return
+        try:
+            world_trajectories = trajectory_in_world(plan, self.safety)
+        except ConfigError as exc:
+            self._reject_trajectory("trajectory_upload", mission_id, str(exc))
+            return
+        futures = []
+        for name in self.robot_names:
+            request = UploadTrajectory.Request()
+            request.trajectory_id = trajectory_id
+            request.piece_offset = 0
+            request.pieces = [
+                self._trajectory_piece_message(piece)
+                for piece in world_trajectories[name].pieces
+            ]
+            futures.append(
+                self.upstream_clients[name]["upload_trajectory"].call_async(request)
+            )
+        self._trajectory_upload_pending = PendingTrajectoryUpload(
+            mission_id=mission_id,
+            trajectory_id=trajectory_id,
+            plan=plan,
+            futures=futures,
+        )
+        self._publish_command(
+            "trajectory_upload",
+            "pending",
+            details=json.dumps(
+                {"mission_id": mission_id, "trajectory_id": trajectory_id},
+                separators=(",", ":"),
+            ),
+        )
+
+    def _poll_trajectory_upload(self) -> None:
+        pending = self._trajectory_upload_pending
+        if pending is None or any(not future.done() for future in pending.futures):
+            return
+        errors = []
+        for future in pending.futures:
+            try:
+                future.result()
+            except Exception as exc:  # pragma: no cover - rclpy exception types vary
+                errors.append(str(exc))
+        self._trajectory_upload_pending = None
+        if errors:
+            self._reject_trajectory(
+                "trajectory_upload", pending.mission_id, "; ".join(errors)
+            )
+            return
+        self._prepared_trajectory = PreparedTrajectory(
+            mission_id=pending.mission_id,
+            trajectory_id=pending.trajectory_id,
+            plan=pending.plan,
+        )
+        details = {
+            "mission_id": pending.mission_id,
+            "trajectory_id": pending.trajectory_id,
+            "duration_s": pending.plan.duration_s,
+            "start_positions": pending.plan.start_positions,
+            "end_positions": pending.plan.end_positions,
+            "metrics": asdict(pending.plan.metrics) if pending.plan.metrics else {},
+        }
+        self._publish_command(
+            "trajectory_upload",
+            "accepted",
+            details=json.dumps(details, separators=(",", ":")),
+        )
+
+    def _trajectory_start_callback(self, message: String) -> None:
+        mission_id = "invalid"
+        try:
+            payload = json.loads(message.data)
+            if not isinstance(payload, dict):
+                raise ValueError("trajectory start must be a JSON object")
+            mission_id = payload.get("mission_id")
+            trajectory_id = payload.get("trajectory_id")
+            timescale = float(payload.get("timescale", 1.0))
+            if not isinstance(mission_id, str) or not mission_id:
+                raise ValueError("mission_id must be a non-empty string")
+            if (
+                isinstance(trajectory_id, bool)
+                or not isinstance(trajectory_id, int)
+                or not 0 <= trajectory_id <= 255
+            ):
+                raise ValueError("trajectory_id must be an integer from 0 to 255")
+            if not isfinite(timescale) or abs(timescale - 1.0) > 1e-7:
+                raise ValueError("trajectory timescale must be exactly 1.0")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._reject_trajectory("trajectory_start", mission_id, str(exc))
+            return
+        prepared = self._prepared_trajectory
+        if prepared is None:
+            self._reject_trajectory(
+                "trajectory_start", mission_id, "no trajectory is prepared"
+            )
+            return
+        if (
+            mission_id != prepared.mission_id
+            or trajectory_id != prepared.trajectory_id
+        ):
+            self._reject_trajectory(
+                "trajectory_start", mission_id, "prepared mission or trajectory ID mismatch"
+            )
+            return
+        if self._trajectory_started:
+            self._reject_trajectory(
+                "trajectory_start", mission_id, "trajectory was already started"
+            )
+            return
+        if self._batch_end_at is not None and self._now() < self._batch_end_at:
+            self._reject_trajectory(
+                "trajectory_start", mission_id, "coordinated prepositioning is in progress"
+            )
+            return
+        if (
+            not self.last_evaluation.commands_allowed
+            or self.machine.state is not SafetyState.FLYING
+        ):
+            reason = "; ".join(self.last_evaluation.reasons) or (
+                f"commands are blocked in {self.machine.state.value}"
+            )
+            self._reject_trajectory("trajectory_start", mission_id, reason)
+            return
+        if not self.start_trajectory_client.service_is_ready():
+            self._reject_trajectory(
+                "trajectory_start", mission_id, "/all/start_trajectory is unavailable"
+            )
+            return
+        errors = {}
+        for name, target in prepared.plan.start_positions.items():
+            position = self.machine.health[name].position
+            if position is None:
+                errors[name] = None
+                continue
+            actual = point_in_geofence_frame(position, self.safety)
+            error = dist(actual, target)
+            if error > 0.05:
+                errors[name] = error
+        if errors:
+            self._reject_trajectory(
+                "trajectory_start",
+                mission_id,
+                f"robots are not settled at trajectory starts: {errors}",
+            )
+            return
+        request = StartTrajectory.Request()
+        request.group_mask = 0
+        request.trajectory_id = trajectory_id
+        request.timescale = 1.0
+        request.reversed = False
+        request.relative = False
+        self.start_trajectory_client.call_async(request)
+        self._trajectory_started = True
+        self._trajectory_end_at = self._now() + prepared.plan.duration_s
+        self._publish_command(
+            "trajectory_start",
+            "accepted",
+            details=json.dumps(
+                {
+                    "mission_id": mission_id,
+                    "trajectory_id": trajectory_id,
+                    "duration_s": prepared.plan.duration_s,
+                },
+                separators=(",", ":"),
+            ),
+        )
+
+    def _clear_trajectory_state(self) -> None:
+        self._trajectory_upload_pending = None
+        self._prepared_trajectory = None
+        self._trajectory_end_at = None
+        self._trajectory_started = False
+
     def _emergency_callback(
         self, _request: Stop.Request, response: Stop.Response
     ) -> Stop.Response:
@@ -406,6 +692,7 @@ class SafetyGateway(Node):
 
     def _timer_callback(self) -> None:
         now = self._now()
+        self._poll_trajectory_upload()
         self.last_evaluation = self.machine.evaluate(now)
         if self.last_evaluation.action == SafetyAction.LAND:
             self._issue_land(
@@ -424,10 +711,13 @@ class SafetyGateway(Node):
             self._landing_robots.clear()
         if self._batch_end_at is not None and now >= self._batch_end_at:
             self._batch_end_at = None
+        if self._trajectory_end_at is not None and now >= self._trajectory_end_at:
+            self._trajectory_end_at = None
         self._publish_health()
 
     def _issue_land(self, reason: str) -> None:
         self._batch_end_at = None
+        self._trajectory_end_at = None
         self.get_logger().error(f"safety landing: {reason}")
         self._publish_command("safety_land", "requested", details=reason)
         request = Land.Request()
@@ -442,6 +732,7 @@ class SafetyGateway(Node):
 
     def _issue_emergency(self, reason: str) -> None:
         self._batch_end_at = None
+        self._trajectory_end_at = None
         self._landing_disarm_at = None
         self._landing_robots.clear()
         if self.machine.state != SafetyState.EMERGENCY:
@@ -505,6 +796,17 @@ class SafetyGateway(Node):
         )
         self._last_rejection = f"batch_go_to/{batch_id}: {reason}"
         self._publish_command("batch_go_to", "rejected", details=details)
+        self.get_logger().warning(f"rejected {self._last_rejection}")
+
+    def _reject_trajectory(
+        self, command: str, mission_id: str, reason: str
+    ) -> None:
+        details = json.dumps(
+            {"mission_id": mission_id, "reason": reason},
+            separators=(",", ":"),
+        )
+        self._last_rejection = f"{command}/{mission_id}: {reason}"
+        self._publish_command(command, "rejected", details=details)
         self.get_logger().warning(f"rejected {self._last_rejection}")
 
     def _publish_health(self) -> None:
