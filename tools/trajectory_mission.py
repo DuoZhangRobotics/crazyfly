@@ -112,7 +112,7 @@ def mission_report(
     errors = {name: [] for name in plan.trajectories}
     minimum_separation: float | None = None
     motion_started_at: dict[str, float] = {}
-    starts = plan.start_positions
+    measured_starts: dict[str, tuple[float, float, float]] | None = None
     for timestamp, positions in pose_samples:
         elapsed = timestamp - started_at
         if not 0.0 <= elapsed <= plan.duration_s or set(positions) != set(
@@ -120,12 +120,14 @@ def mission_report(
         ):
             continue
         expected = evaluate_plan(plan, elapsed)
+        if measured_starts is None:
+            measured_starts = dict(positions)
         for name in plan.trajectories:
             error = math.dist(positions[name], expected[name])
             errors[name].append(error)
             if (
                 name not in motion_started_at
-                and math.dist(positions[name], starts[name]) >= 0.01
+                and math.dist(positions[name], measured_starts[name]) >= 0.01
             ):
                 motion_started_at[name] = elapsed
         for first, second in combinations(sorted(positions), 2):
@@ -145,13 +147,16 @@ def mission_report(
                 "maximum_m": max(values),
             }
     onset_values = list(motion_started_at.values())
+    onset_is_observable = (
+        plan.metrics is not None and plan.metrics.maximum_speed_m_s >= 0.10
+    )
     return {
         "duration_s": plan.duration_s,
         "tracking_error": per_robot,
         "minimum_separation_m": minimum_separation,
         "motion_start_skew_s": (
             max(onset_values) - min(onset_values)
-            if len(onset_values) == len(plan.trajectories)
+            if onset_is_observable and len(onset_values) == len(plan.trajectories)
             else None
         ),
         "battery_minimum_v": battery_minima,
@@ -206,6 +211,7 @@ def _run_mission(
     battery_minima: dict[str, float] = {}
     trajectory_started_at: float | None = None
     flight_active = False
+    launch_positions: dict[str, tuple[float, float, float]] | None = None
 
     def event_callback(message: String) -> None:
         nonlocal safety_action, trajectory_started_at
@@ -314,6 +320,17 @@ def _run_mission(
         if stale:
             raise RuntimeError(f"base-frame poses are stale for: {', '.join(stale)}")
         return dict(positions_base)
+
+    def fresh_positions(timeout_s: float = 1.0) -> dict[str, tuple[float, float, float]]:
+        deadline = time.monotonic() + timeout_s
+        last_error = "poses did not become fresh"
+        while time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.02)
+            try:
+                return current_positions()
+            except RuntimeError as exc:
+                last_error = str(exc)
+        raise RuntimeError(last_error)
 
     def wait_result(command: str, key: str, timeout_s: float) -> dict[str, object]:
         deadline = time.monotonic() + timeout_s
@@ -455,6 +472,32 @@ def _run_mission(
         spin_for(duration_s)
         wait_settled(goals, tolerance_m, 0.5, 3.0)
 
+    def return_to_launch(label: str) -> None:
+        if launch_positions is None:
+            raise RuntimeError("captured launch positions are unavailable")
+        errors = []
+        for attempt in range(1, 4):
+            if safety_action:
+                raise RuntimeError("safety gateway stopped return-to-launch")
+            try:
+                actual = fresh_positions()
+                distance_m = max(
+                    math.dist(actual[name], launch_positions[name])
+                    for name in robot_names
+                )
+                duration_s = max(2.0, distance_m / 0.20)
+                send_batch(
+                    f"{label}-attempt-{attempt}",
+                    launch_positions,
+                    duration_s,
+                    0.08,
+                )
+                return
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                spin_for(1.0)
+        raise RuntimeError("return-to-launch failed: " + "; ".join(errors))
+
     try:
         wait_for_services()
         _publish_event(
@@ -498,7 +541,7 @@ def _run_mission(
         spin_for(3.5)
         if safety_action:
             raise RuntimeError("safety gateway stopped takeoff")
-        launch_positions = current_positions()
+        launch_positions = fresh_positions()
         start_positions = plan.start_positions
         preposition_distance = max(
             math.dist(launch_positions[name], start_positions[name])
@@ -545,20 +588,20 @@ def _run_mission(
         if safety_action:
             raise RuntimeError("safety gateway stopped trajectory execution")
         wait_settled(plan.end_positions, 0.08, 0.3, 2.0)
-        report = mission_report(
-            plan, trajectory_started_at, pose_samples, battery_minima
+        _publish_event(
+            command_publisher,
+            "trajectory_complete",
+            "accepted",
+            {"mission_id": mission_id, "duration_s": plan.duration_s},
         )
-        _publish_event(command_publisher, "trajectory_complete", "accepted", report)
 
-        return_distance = max(
-            math.dist(current_positions()[name], launch_positions[name])
-            for name in robot_names
-        )
-        return_duration = max(2.0, return_distance / 0.20)
-        send_batch("return", launch_positions, return_duration, 0.08)
+        return_to_launch("return")
         land()
         spin_for(1.5)
         flight_active = False
+        report = mission_report(
+            plan, trajectory_started_at, pose_samples, battery_minima
+        )
         completed = dict(report)
         completed["mission_id"] = mission_id
         completed["returned_to_launch"] = True
@@ -578,6 +621,8 @@ def _run_mission(
             },
         )
         if flight_active and not safety_action:
+            with suppress(Exception):
+                return_to_launch("abort-return")
             with suppress(Exception):
                 land()
                 spin_for(1.5)

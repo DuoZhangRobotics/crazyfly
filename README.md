@@ -199,8 +199,8 @@ The mission waits at the trajectory starts, broadcasts one absolute
 captured launch position before landing. The conservative reviewed four-drone
 dry-run example is `config/trajectories/four_drone_box.yaml`: it first assembles
 a 35 cm-spaced line, executes a smooth 4 cm box as a formation, returns to the
-line, then returns to launch. It must not be executed until the one-drone
-polynomial rollout passes.
+line, then returns to launch. Its first physical execution passed on 2026-08-30;
+repeatability testing remains required before involving the UR5e.
 
 ## OptiTrack-only workflow
 

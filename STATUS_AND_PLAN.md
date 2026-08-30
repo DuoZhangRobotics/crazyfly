@@ -58,7 +58,25 @@ waypoints compile to continuously validated degree-7 minimum-snap polynomials,
 upload while disarmed, move atomically to their starting points, broadcast one
 absolute start, report tracking metrics, return to launch, and land. Automatic
 and external Trigger start modes both pass complete hardware-free executions.
-No polynomial mission has been flown physically yet.
+
+The first physical four-drone polynomial mission passed on 2026-08-30. All four
+drones took off, assembled a 35 cm-spaced line, executed the 12-second smooth
+4 cm formation box, returned to their captured launch positions, landed, and
+disarmed without a safety event. Mean tracking error was 1.0-1.7 cm, maximum
+error was 3.0-3.5 cm, and measured minimum separation was 32.9 cm. All 3,509 raw
+point-cloud samples contained exactly four markers. Minimum loaded battery
+voltage was 3.39 V. Motion-start skew is intentionally reported as unavailable
+for this 0.029 m/s path because onset cannot be distinguished reliably from
+position noise at that speed.
+
+A larger 30 cm by 16 cm, 16-second figure-eight then passed cleanly after fixing
+the mission ordering so tracking reports are computed only after return and
+landing. Any non-safety failure now reacquires fresh poses and makes up to three
+atomic return-to-launch attempts before fallback landing. The clean run returned
+all drones to the tabletop and landed without a safety event; mean tracking
+error was 1.4-2.3 cm, maximum error was 3.4-4.8 cm, and minimum separation was
+32.7 cm. Five transient extra-marker samples were recorded, all about 4.6-4.7 cm
+from cf2, indicating a local reflection or split reconstruction.
 
 ## 2. Installed environment
 
@@ -263,13 +281,11 @@ sequential takeoff/landing before synchronized trajectories. Begin well above
 
 ### Stage F: onboard polynomial trajectories
 
-1. Run the short version-2 polynomial with one drone and review continuous
-   tracking error.
-2. Require mean error at most 3 cm and maximum error at most 8 cm.
-3. Dry-run and review `four_drone_box.yaml`, then repeat it three times with
-   measured separation at least 20 cm and no safety event.
-4. Repeat with the powered UR5e stationary outside the reviewed flight paths.
-5. Only then add an RTDE coordinator that releases `/crazyfly/mission/start`.
+1. Repeat `four_drone_box.yaml` twice more with measured separation at least
+   20 cm, mean error at most 3 cm, maximum error at most 8 cm, and no safety
+   event.
+2. Repeat with the powered UR5e stationary outside the reviewed flight paths.
+3. Only then add an RTDE coordinator that releases `/crazyfly/mission/start`.
 
 ## 8. Non-negotiable constraints
 
