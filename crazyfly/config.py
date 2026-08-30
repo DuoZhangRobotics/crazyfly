@@ -54,8 +54,13 @@ class SafetyConfig:
     pose_reject_age_s: float
     pose_land_age_s: float
     pose_emergency_age_s: float
+    pose_identity_emergency_age_s: float | None
     status_stale_age_s: float
     recovery_time_s: float
+    expected_raw_marker_count: int | None
+    marker_count_grace_s: float
+    maximum_pose_speed_m_s: float | None
+    pose_speed_action: str
     battery_warning_v: float
     battery_critical_v: float
     maximum_takeoff_height_m: float
@@ -189,11 +194,13 @@ def load_safety(path: str | Path) -> SafetyConfig:
     if not isinstance(data, Mapping):
         raise ConfigError("safety configuration must define crazyfly_safety")
     timeouts = data.get("timeouts", {})
+    tracking = data.get("tracking", {})
     battery = data.get("battery", {})
     limits = data.get("limits", {})
     fence = data.get("geofence", {})
     for name, value in (
         ("timeouts", timeouts),
+        ("tracking", tracking),
         ("battery", battery),
         ("limits", limits),
         ("geofence", fence),
@@ -204,6 +211,37 @@ def load_safety(path: str | Path) -> SafetyConfig:
     flight_enabled = data.get("flight_enabled", False)
     if not isinstance(flight_enabled, bool):
         raise ConfigError("crazyfly_safety.flight_enabled must be true or false")
+
+    identity_emergency = tracking.get("pose_identity_emergency_s")
+    pose_identity_emergency_age_s = (
+        None
+        if identity_emergency is None
+        else _finite_number(
+            identity_emergency, "tracking.pose_identity_emergency_s"
+        )
+    )
+    expected_marker_count = tracking.get("expected_raw_marker_count")
+    if expected_marker_count is None:
+        expected_raw_marker_count = None
+    elif (
+        isinstance(expected_marker_count, bool)
+        or not isinstance(expected_marker_count, int)
+        or expected_marker_count <= 0
+    ):
+        raise ConfigError(
+            "tracking.expected_raw_marker_count must be a positive integer"
+        )
+    else:
+        expected_raw_marker_count = expected_marker_count
+    maximum_pose_speed = tracking.get("maximum_pose_speed_m_s")
+    maximum_pose_speed_m_s = (
+        None
+        if maximum_pose_speed is None
+        else _finite_number(maximum_pose_speed, "tracking.maximum_pose_speed_m_s")
+    )
+    pose_speed_action = tracking.get("pose_speed_action", "emergency")
+    if pose_speed_action not in {"land", "emergency"}:
+        raise ConfigError("tracking.pose_speed_action must be land or emergency")
 
     geofence_frame = fence.get("frame", "world")
     if not isinstance(geofence_frame, str) or geofence_frame not in {"world", "base"}:
@@ -249,12 +287,20 @@ def load_safety(path: str | Path) -> SafetyConfig:
         pose_emergency_age_s=_finite_number(
             timeouts.get("pose_emergency_s", 1.000), "timeouts.pose_emergency_s"
         ),
+        pose_identity_emergency_age_s=pose_identity_emergency_age_s,
         status_stale_age_s=_finite_number(
             timeouts.get("status_stale_s", 2.500), "timeouts.status_stale_s"
         ),
         recovery_time_s=_finite_number(
             timeouts.get("recovery_s", 1.000), "timeouts.recovery_s"
         ),
+        expected_raw_marker_count=expected_raw_marker_count,
+        marker_count_grace_s=_finite_number(
+            tracking.get("marker_count_grace_s", 0.050),
+            "tracking.marker_count_grace_s",
+        ),
+        maximum_pose_speed_m_s=maximum_pose_speed_m_s,
+        pose_speed_action=pose_speed_action,
         battery_warning_v=_finite_number(
             battery.get("warning_v", 3.8), "battery.warning_v"
         ),
@@ -289,12 +335,23 @@ def load_safety(path: str | Path) -> SafetyConfig:
         < config.pose_emergency_age_s
     ):
         raise ConfigError("pose timeouts must satisfy reject < land < emergency")
+    if (
+        config.pose_identity_emergency_age_s is not None
+        and not config.pose_reject_age_s
+        <= config.pose_identity_emergency_age_s
+        <= config.pose_emergency_age_s
+    ):
+        raise ConfigError(
+            "tracking.pose_identity_emergency_s must be between pose reject "
+            "and emergency timeouts"
+        )
     if not 0 < config.battery_critical_v <= config.battery_warning_v:
         raise ConfigError("battery thresholds must satisfy 0 < critical <= warning")
     if (
         min(
             config.status_stale_age_s,
             config.recovery_time_s,
+            config.marker_count_grace_s,
             config.maximum_takeoff_height_m,
             config.maximum_command_speed_m_s,
             config.minimum_separation_m,
@@ -302,6 +359,11 @@ def load_safety(path: str | Path) -> SafetyConfig:
         <= 0
     ):
         raise ConfigError("safety timeouts and limits must be positive")
+    if (
+        config.maximum_pose_speed_m_s is not None
+        and config.maximum_pose_speed_m_s <= 0
+    ):
+        raise ConfigError("tracking.maximum_pose_speed_m_s must be positive")
     if config.soft_geofence_margin_m < 0:
         raise ConfigError("soft geofence margin must be non-negative")
     if config.flight_enabled and not config.has_geofence:

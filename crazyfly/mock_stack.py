@@ -9,10 +9,12 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from crazyflie_interfaces.msg import Status
 from crazyflie_interfaces.srv import Arm, GoTo, Land, Takeoff
+from geometry_msgs.msg import PoseStamped
 from motion_capture_tracking_interfaces.msg import NamedPose, NamedPoseArray
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
 from std_srvs.srv import Empty, SetBool
 
 from .config import load_fleet
@@ -42,6 +44,13 @@ class MockStack(Node):
         self.pose_publisher = self.create_publisher(
             NamedPoseArray, "/poses", qos_profile_sensor_data
         )
+        self.point_cloud_publisher = self.create_publisher(
+            PointCloud2, "/pointCloud", qos_profile_sensor_data
+        )
+        self.onboard_pose_publishers = {
+            name: self.create_publisher(PoseStamped, f"/{name}/pose", 10)
+            for name in self.robots
+        }
         self.status_publishers = {
             name: self.create_publisher(Status, f"/{name}/status", 10)
             for name in self.robots
@@ -78,7 +87,16 @@ class MockStack(Node):
             pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = robot.position
             pose.pose.orientation.w = 1.0
             message.poses.append(pose)
+            onboard = PoseStamped()
+            onboard.header = message.header
+            onboard.pose = pose.pose
+            self.onboard_pose_publishers[name].publish(onboard)
         self.pose_publisher.publish(message)
+        point_cloud = PointCloud2()
+        point_cloud.header = message.header
+        point_cloud.height = 1
+        point_cloud.width = len(self.robots)
+        self.point_cloud_publisher.publish(point_cloud)
 
     def _publish_status(self) -> None:
         for name, robot in self.robots.items():

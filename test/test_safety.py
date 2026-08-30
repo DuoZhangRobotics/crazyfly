@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from crazyfly.config import load_safety
@@ -38,6 +39,26 @@ def _ready_machine(names=("cf1",)) -> SafetyMachine:
     return machine
 
 
+def _ready_identity_machine(names=("cf1", "cf2")) -> SafetyMachine:
+    config = replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        expected_raw_marker_count=len(names),
+        marker_count_grace_s=0.05,
+        pose_identity_emergency_age_s=0.10,
+        maximum_pose_speed_m_s=0.75,
+    )
+    machine = SafetyMachine(config, names)
+    _record_healthy(machine, 0.0)
+    machine.record_raw_marker_count(len(names), 0.0)
+    machine.evaluate(0.0)
+    _record_healthy(machine, 1.01)
+    machine.record_raw_marker_count(len(names), 1.01)
+    machine.evaluate(1.01)
+    success, reasons = machine.enable(1.01)
+    assert success, reasons
+    return machine
+
+
 def test_preflight_requires_a_stable_recovery_interval() -> None:
     machine = SafetyMachine(load_safety(ROOT / "config" / "mock_safety.yaml"), ("cf1",))
     _record_healthy(machine, 0.0)
@@ -48,6 +69,89 @@ def test_preflight_requires_a_stable_recovery_interval() -> None:
 
     assert not success
     assert "healthy recovery interval has not completed" in reasons
+
+
+def test_preflight_requires_the_reviewed_raw_marker_count() -> None:
+    machine = _ready_identity_machine()
+    machine.disable()
+    machine.record_raw_marker_count(1, 2.0)
+    _record_healthy(machine, 2.0)
+
+    success, reasons = machine.preflight(2.0)
+
+    assert not success
+    assert "raw marker count mismatch: expected 2, got 1" in reasons
+
+
+def test_persistent_raw_marker_loss_emergency_stops_before_reassignment() -> None:
+    machine = _ready_identity_machine()
+    machine.mark_flying()
+    _record_healthy(machine, 1.02)
+    machine.record_raw_marker_count(1, 1.02)
+
+    transient = machine.evaluate(1.04)
+    persistent = machine.evaluate(1.08)
+
+    assert transient.action is SafetyAction.NONE
+    assert persistent.action is SafetyAction.EMERGENCY
+    assert persistent.reasons == ("raw marker count mismatch: expected 2, got 1",)
+
+
+def test_identity_timeout_emergency_stops_instead_of_position_controlled_land() -> None:
+    machine = _ready_identity_machine()
+    machine.mark_flying()
+    machine.record_raw_marker_count(2, 1.12)
+
+    result = machine.evaluate(1.12)
+
+    assert result.action is SafetyAction.EMERGENCY
+    assert result.reasons == (
+        "tracking identity lost: cf1",
+        "tracking identity lost: cf2",
+    )
+
+
+def test_implausible_pose_jump_is_an_immediate_identity_fault() -> None:
+    machine = _ready_identity_machine(("cf1",))
+    machine.mark_flying()
+    machine.record_raw_marker_count(1, 1.02)
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
+    machine.record_pose("cf1", (0.10, 0.0, 0.3), 1.02)
+
+    result = machine.evaluate(1.02)
+
+    assert result.action is SafetyAction.EMERGENCY
+    assert result.reasons[0].startswith("implausible pose speed: cf1")
+
+
+def test_one_drone_pose_speed_wobble_requests_landing_without_lock() -> None:
+    machine = _ready_identity_machine(("cf1",))
+    machine.config = replace(machine.config, pose_speed_action="land")
+    machine.mark_flying()
+    machine.record_raw_marker_count(1, 1.02)
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
+    machine.record_pose("cf1", (0.10, 0.0, 0.3), 1.02)
+
+    result = machine.evaluate(1.02)
+
+    assert result.action is SafetyAction.LAND
+    assert result.state is SafetyState.LANDING
+    assert machine.operator_enabled
+
+
+def test_touchdown_pose_jump_does_not_emergency_stop_during_landing() -> None:
+    machine = _ready_identity_machine(("cf1",))
+    machine.mark_flying()
+    machine.mark_landing()
+    machine.record_raw_marker_count(1, 1.02)
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
+    machine.record_pose("cf1", (0.10, 0.0, 0.04), 1.02)
+
+    result = machine.evaluate(1.02)
+
+    assert result.action is SafetyAction.NONE
+    assert result.state is SafetyState.LANDING
+    assert result.reasons[0].startswith("implausible pose speed: cf1")
 
 
 def test_preflight_accepts_an_already_armed_auto_arm_crazyflie() -> None:

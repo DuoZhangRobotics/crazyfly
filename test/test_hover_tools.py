@@ -36,10 +36,28 @@ def test_drone_index_selects_only_matching_fleet_entry(
     def fake_hover_main(arguments):
         selected_path = Path(arguments[arguments.index("--fleet") + 1])
         selected = yaml.safe_load(selected_path.read_text())
+        safety_path = Path(arguments[arguments.index("--safety") + 1])
+        safety = yaml.safe_load(safety_path.read_text())
         enabled = {
             name for name, robot in selected["robots"].items() if robot["enabled"]
         }
         assert enabled == {"cf3"}
+        assert (
+            safety["crazyfly_safety"]["tracking"]["expected_raw_marker_count"]
+            == 1
+        )
+        tracking = safety["crazyfly_safety"]["tracking"]
+        assert tracking["maximum_pose_speed_m_s"] is None
+        assert tracking["pose_identity_emergency_s"] == 1.0
+        assert tracking["marker_count_grace_s"] == 1.0
+        assert safety["crazyfly_safety"]["timeouts"]["recovery_s"] == 1.0
+        topics = selected["all"]["firmware_logging"]["custom_topics"]
+        assert topics["estimator_debug"]["frequency"] == 2
+        assert topics["estimator_debug"]["vars"] == [
+            "kalman.varPX",
+            "kalman.varPY",
+            "kalman.varPZ",
+        ]
         assert four_drone_hover.EXPECTED_ROBOTS == ("cf3",)
         return 0
 
@@ -51,6 +69,53 @@ def test_drone_index_selects_only_matching_fleet_entry(
 def test_drone_index_must_keep_leading_zero() -> None:
     with pytest.raises(SystemExit):
         one_drone_hover.main(["3"])
+
+
+def test_four_drone_execution_defaults_to_staged_mode() -> None:
+    args = four_drone_hover._parser().parse_args(["--execute"])
+    assert args.execute
+    assert not args.synchronized
+
+
+def test_synchronized_mode_requires_an_explicit_flag() -> None:
+    args = four_drone_hover._parser().parse_args(["--execute", "--synchronized"])
+    assert args.execute
+    assert args.synchronized
+
+
+def test_missing_startup_telemetry_is_retryable() -> None:
+    error = RuntimeError(
+        "startup telemetry unavailable: missing status for cf3; "
+        "missing battery for cf3"
+    )
+    assert four_drone_hover._is_retryable_telemetry_startup_failure(error)
+    estimator_error = RuntimeError(
+        "startup telemetry unavailable: estimator variance received only "
+        "0 of 10 samples"
+    )
+    assert four_drone_hover._is_retryable_telemetry_startup_failure(
+        estimator_error
+    )
+
+
+def test_locked_drone_is_not_automatically_restarted() -> None:
+    error = RuntimeError("gateway refused enable: locked: cf3")
+    assert not four_drone_hover._is_retryable_telemetry_startup_failure(error)
+
+
+def test_estimator_variance_requires_ten_stable_samples() -> None:
+    stable = [(0.0005, 0.0006, 0.0007)] * 10
+    assert not four_drone_hover._estimator_variance_stable(stable[:9])
+    assert four_drone_hover._estimator_variance_stable(stable)
+
+
+def test_estimator_variance_rejects_range_and_non_finite_values() -> None:
+    unstable = [(0.0005, 0.0006, 0.0007)] * 9 + [(0.002, 0.0006, 0.0007)]
+    non_finite = [(0.0005, 0.0006, 0.0007)] * 9 + [
+        (float("nan"), 0.0006, 0.0007)
+    ]
+    assert not four_drone_hover._estimator_variance_stable(unstable)
+    assert not four_drone_hover._estimator_variance_stable(non_finite)
 
 
 def test_cleanup_temporarily_ignores_repeated_termination_signals() -> None:
@@ -77,3 +142,5 @@ def test_stop_launch_checks_radio_even_if_launch_parent_already_exited(
         "ensure_crazyradio_free",
         lambda: calls.append("checked"),
     )
+    four_drone_hover._stop_launch(FakeProcess())
+    assert calls == ["checked"]

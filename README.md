@@ -178,6 +178,8 @@ Physical launch requires all of these explicit local changes:
 2. A local safety file with `flight_enabled: true` and measured geofence bounds.
 3. A local motion-capture file with the real Motive address.
 4. The command-line gate `allow_hardware:=true`.
+5. An exact reviewed `tracking.expected_raw_marker_count` for the current
+   single-marker volume.
 
 The launch validates all three files before starting Crazyswarm2. Use absolute
 paths so there is no ambiguity:
@@ -198,6 +200,34 @@ configuration accepts mocap arrival rates from 80-180 Hz to accommodate the
 nominal 120 Hz stream. Before the first flight, repeat preflight and use a clear
 controlled volume with a dedicated emergency-stop operator.
 
+Single-marker identities are initialized from configured starting positions;
+the markers do not contain radio-address identity. Keep only the expected
+unlabeled markers in the volume. A persistent raw-marker count change, a
+missing named pose, or an implausible pose jump is treated as an identity fault
+before another marker can be reassigned to that drone.
+
+The one-drone helper requires exactly one visible marker:
+
+```sh
+source tools/activate_ros.sh
+python tools/one_drone_hover.py 01 --execute
+```
+
+The four-drone helper defaults to staged validation with all four trackers
+active but only one aircraft flying at a time:
+
+```sh
+source tools/activate_ros.sh
+python tools/four_drone_hover.py --execute
+```
+
+Only after the staged run and its logs pass, synchronized takeoff can be
+requested explicitly:
+
+```sh
+python tools/four_drone_hover.py --execute --synchronized
+```
+
 ## Experiment logging
 
 The logger writes newline-delimited pose, status, safety, diagnostic, and command
@@ -215,3 +245,8 @@ ros2 run crazyfly crazyfly_experiment_logger --ros-args \
 
 Generated `experiments/`, `log/`, `build/`, and `install/` data is ignored by
 Git.
+
+Physical swarm launches start this bounded logger automatically. Named mocap
+positions, onboard position estimates, raw marker counts, safety state, status,
+and command events are preserved under `experiments/`. Positions are converted
+to the configured geofence frame, which is `base` in the local UR5e profile.

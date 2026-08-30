@@ -11,15 +11,43 @@ import shutil
 import subprocess
 import time
 
-from crazyflie_interfaces.msg import Status
+from crazyflie_interfaces.msg import LogDataGeneric, Status
 from diagnostic_msgs.msg import DiagnosticArray
+from geometry_msgs.msg import PoseStamped
 from motion_capture_tracking_interfaces.msg import NamedPoseArray
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 
-from .config import load_fleet, load_safety
+from .config import load_fleet, load_safety, point_in_geofence_frame
+
+DEBUG_TOPICS = {
+    "estimator_debug": (
+        "kalman.varPX",
+        "kalman.varPY",
+        "kalman.varPZ",
+    ),
+    "flight_debug": (
+        "stateEstimate.vx",
+        "stateEstimate.vy",
+        "stabilizer.roll",
+        "stabilizer.pitch",
+        "stabilizer.yaw",
+        "ctrlMel.i_err_x",
+    ),
+    "actuator_debug": (
+        "ctrlMel.cmd_roll",
+        "ctrlMel.cmd_pitch",
+        "ctrlMel.cmd_yaw",
+        "ctrlMel.cmd_thrust",
+        "motor.m1",
+        "motor.m2",
+        "motor.m3",
+        "motor.m4",
+    ),
+}
 
 
 class ExperimentLogger(Node):
@@ -36,7 +64,7 @@ class ExperimentLogger(Node):
         if not fleet_path or not safety_path:
             raise RuntimeError("fleet_config_file and safety_config_file are required")
         fleet = load_fleet(fleet_path)
-        load_safety(safety_path)
+        self.safety = load_safety(safety_path)
 
         try:
             self.maximum_duration_s = float(
@@ -88,6 +116,12 @@ class ExperimentLogger(Node):
             NamedPoseArray, "/poses", self._poses_callback, qos_profile_sensor_data
         )
         self.create_subscription(
+            PointCloud2,
+            "/pointCloud",
+            self._point_cloud_callback,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
             String, "/crazyfly/safety/state", self._state_callback, 10
         )
         self.create_subscription(
@@ -106,16 +140,36 @@ class ExperimentLogger(Node):
                 partial(self._status_callback, name),
                 10,
             )
+            self.create_subscription(
+                PoseStamped,
+                f"/{name}/pose",
+                partial(self._onboard_pose_callback, name),
+                10,
+            )
+            for topic in DEBUG_TOPICS:
+                self.create_subscription(
+                    LogDataGeneric,
+                    f"/{name}/{topic}",
+                    partial(self._debug_callback, name, topic),
+                    10,
+                )
         self.create_timer(1.0, self._duration_guard)
 
         if record_rosbag:
             topics = [
                 "/poses",
+                "/pointCloud",
                 "/crazyfly/commands",
                 "/crazyfly/safety/state",
                 "/crazyfly/safety/diagnostics",
             ]
             topics.extend(f"/{name}/status" for name in fleet.enabled)
+            topics.extend(f"/{name}/pose" for name in fleet.enabled)
+            topics.extend(
+                f"/{name}/{topic}"
+                for name in fleet.enabled
+                for topic in DEBUG_TOPICS
+            )
             self.bag_process = subprocess.Popen(
                 [
                     "ros2",
@@ -149,12 +203,62 @@ class ExperimentLogger(Node):
         self._write(
             "poses",
             {
-                pose.name: [
-                    pose.pose.position.x,
-                    pose.pose.position.y,
-                    pose.pose.position.z,
-                ]
-                for pose in message.poses
+                "source_frame": message.header.frame_id,
+                "frame": self.safety.geofence_frame,
+                "positions": {
+                    pose.name: point_in_geofence_frame(
+                        (
+                            pose.pose.position.x,
+                            pose.pose.position.y,
+                            pose.pose.position.z,
+                        ),
+                        self.safety,
+                    )
+                    for pose in message.poses
+                },
+            },
+        )
+
+    def _point_cloud_callback(self, message: PointCloud2) -> None:
+        self._write(
+            "raw_marker_count",
+            {
+                "source_frame": message.header.frame_id,
+                "count": message.width * message.height,
+            },
+        )
+
+    def _onboard_pose_callback(self, name: str, message: PoseStamped) -> None:
+        position = message.pose.position
+        orientation = message.pose.orientation
+        self._write(
+            "onboard_pose",
+            {
+                "robot": name,
+                "source_frame": message.header.frame_id,
+                "frame": self.safety.geofence_frame,
+                "position": point_in_geofence_frame(
+                    (position.x, position.y, position.z), self.safety
+                ),
+                "orientation_xyzw": [
+                    orientation.x,
+                    orientation.y,
+                    orientation.z,
+                    orientation.w,
+                ],
+            },
+        )
+
+    def _debug_callback(
+        self, name: str, topic: str, message: LogDataGeneric
+    ) -> None:
+        variables = DEBUG_TOPICS[topic]
+        self._write(
+            topic,
+            {
+                "robot": name,
+                "onboard_timestamp_ms": message.timestamp,
+                "values": dict(zip(variables, message.values)),
             },
         )
 

@@ -205,6 +205,10 @@ def validate_hardware_configuration(
         raise ConfigError(
             "hardware launch requires flight_enabled: true in a reviewed local safety file"
         )
+    if safety.expected_raw_marker_count is None:
+        raise ConfigError(
+            "hardware launch requires tracking.expected_raw_marker_count"
+        )
     return fleet, safety
 
 

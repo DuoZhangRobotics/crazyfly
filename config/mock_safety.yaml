@@ -6,6 +6,12 @@ crazyfly_safety:
     pose_emergency_s: 1.000
     status_stale_s: 2.500
     recovery_s: 1.000
+  tracking:
+    expected_raw_marker_count:
+    marker_count_grace_s: 0.050
+    pose_identity_emergency_s:
+    maximum_pose_speed_m_s:
+    pose_speed_action: emergency
   battery:
     warning_v: 3.8
     critical_v: 3.7

@@ -60,6 +60,23 @@ def _hardware_nodes(context):
             output="screen",
             parameters=[load_yaml(fleet_path), server_parameters],
         ),
+        Node(
+            package="crazyfly",
+            executable="crazyfly_experiment_logger",
+            name="crazyfly_experiment_logger",
+            output="screen",
+            parameters=[
+                {
+                    "fleet_config_file": fleet_path,
+                    "safety_config_file": safety_path,
+                    "output_root": LaunchConfiguration(
+                        "experiment_output_root"
+                    ).perform(context),
+                    "maximum_duration_s": 120.0,
+                    "record_rosbag": False,
+                }
+            ],
+        ),
     ]
     if LaunchConfiguration("rviz").perform(context).lower() == "true":
         nodes.append(
@@ -88,6 +105,10 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("safety_config_file", default_value=safety),
             DeclareLaunchArgument("motion_capture_yaml_file", default_value=motion),
             DeclareLaunchArgument("server_config_file", default_value=server),
+            DeclareLaunchArgument(
+                "experiment_output_root",
+                default_value=os.path.abspath("experiments"),
+            ),
             OpaqueFunction(function=_hardware_nodes),
             Node(
                 package="crazyfly",

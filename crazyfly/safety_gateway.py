@@ -17,6 +17,7 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from motion_capture_tracking_interfaces.msg import NamedPoseArray
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 from std_srvs.srv import Empty, SetBool, Trigger
 
@@ -71,6 +72,12 @@ class SafetyGateway(Node):
         )
         self.create_subscription(
             NamedPoseArray, "/poses", self._pose_callback, qos_profile_sensor_data
+        )
+        self.create_subscription(
+            PointCloud2,
+            "/pointCloud",
+            self._point_cloud_callback,
+            qos_profile_sensor_data,
         )
 
         self.upstream_clients: dict[str, dict[str, object]] = {}
@@ -134,6 +141,9 @@ class SafetyGateway(Node):
             self.machine.record_pose(
                 named_pose.name, (position.x, position.y, position.z), received_at
             )
+
+    def _point_cloud_callback(self, message: PointCloud2) -> None:
+        self.machine.record_raw_marker_count(message.width * message.height, self._now())
 
     def _status_callback(self, name: str, message: Status) -> None:
         self.machine.record_status(

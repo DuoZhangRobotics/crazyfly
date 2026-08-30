@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import signal
@@ -26,7 +27,9 @@ DEFAULT_FLEET = ROOT / "config" / "local" / "crazyflies.yaml"
 DEFAULT_SAFETY = ROOT / "config" / "local" / "safety.yaml"
 DEFAULT_MOTION_CAPTURE = ROOT / "config" / "local" / "motion_capture.yaml"
 DEFAULT_SERVER = ROOT / "config" / "server.yaml"
+DEFAULT_OUTPUT_ROOT = ROOT / "experiments"
 EXPECTED_ROBOTS = ("cf1", "cf2", "cf3", "cf4")
+TELEMETRY_RESTART_S = 12.0
 
 
 @contextmanager
@@ -51,10 +54,16 @@ def _parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--execute", action="store_true")
     mode.add_argument("--ros-only", action="store_true")
+    parser.add_argument(
+        "--synchronized",
+        action="store_true",
+        help="take off all selected drones together instead of staged validation",
+    )
     parser.add_argument("--fleet", default=str(DEFAULT_FLEET))
     parser.add_argument("--safety", default=str(DEFAULT_SAFETY))
     parser.add_argument("--motion-capture", default=str(DEFAULT_MOTION_CAPTURE))
     parser.add_argument("--server", default=str(DEFAULT_SERVER))
+    parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     return parser
 
 
@@ -102,9 +111,34 @@ def _call(node, client, request, timeout_s: float = 5.0):
     return future.result()
 
 
-def _run_sequence(launch_process: subprocess.Popen) -> None:
+def _is_retryable_telemetry_startup_failure(error: BaseException) -> bool:
+    return str(error).startswith("startup telemetry unavailable")
+
+
+def _estimator_variance_stable(
+    samples: list[tuple[float, float, float]],
+    *,
+    history_size: int = 10,
+    threshold: float = 0.001,
+) -> bool:
+    if len(samples) < history_size:
+        return False
+    recent = samples[-history_size:]
+    for axis in range(3):
+        values = [sample[axis] for sample in recent]
+        if not all(math.isfinite(value) for value in values):
+            return False
+        if max(values) - min(values) >= threshold:
+            return False
+    return True
+
+
+def _run_sequence(
+    launch_process: subprocess.Popen, *, synchronized: bool = False
+) -> None:
     import rclpy
     from builtin_interfaces.msg import Duration
+    from crazyflie_interfaces.msg import LogDataGeneric
     from crazyflie_interfaces.srv import Land, Stop, Takeoff
     from std_msgs.msg import String
     from std_srvs.srv import SetBool
@@ -115,6 +149,7 @@ def _run_sequence(launch_process: subprocess.Popen) -> None:
     accepted_takeoffs: set[str] = set()
     rejected_takeoffs: set[str] = set()
     accepted_landings: set[str] = set()
+    estimator_variances: list[tuple[float, float, float]] = []
 
     def event_callback(message) -> None:
         nonlocal safety_action
@@ -134,6 +169,19 @@ def _run_sequence(launch_process: subprocess.Popen) -> None:
             safety_action = True
 
     node.create_subscription(String, "/crazyfly/commands", event_callback, 10)
+    if len(EXPECTED_ROBOTS) == 1:
+        robot = EXPECTED_ROBOTS[0]
+
+        def estimator_callback(message: LogDataGeneric) -> None:
+            if len(message.values) >= 3:
+                estimator_variances.append(tuple(message.values[:3]))
+
+        node.create_subscription(
+            LogDataGeneric,
+            f"/{robot}/estimator_debug",
+            estimator_callback,
+            10,
+        )
     enable = node.create_client(SetBool, "/crazyfly/enable")
     takeoff_clients = {
         name: node.create_client(Takeoff, f"/crazyfly/{name}/takeoff")
@@ -156,9 +204,33 @@ def _run_sequence(launch_process: subprocess.Popen) -> None:
             if not client.wait_for_service(timeout_sec=20.0):
                 raise RuntimeError(f"gateway service unavailable: {name}")
 
-        # Allow radio connections, status logs, and the gateway recovery
-        # interval to stabilize. Enable performs the actual health check and is
-        # retried for transient firmware/log startup states.
+        if len(EXPECTED_ROBOTS) == 1:
+            print(
+                "Waiting for ten stable Kalman variance samples before enable",
+                flush=True,
+            )
+            estimator_deadline = time.monotonic() + 20.0
+            while not _estimator_variance_stable(estimator_variances):
+                if launch_process.poll() is not None:
+                    raise RuntimeError(
+                        "ROS launch exited before estimator became stable"
+                    )
+                if time.monotonic() >= estimator_deadline:
+                    if len(estimator_variances) < 10:
+                        raise RuntimeError(
+                            "startup telemetry unavailable: estimator variance "
+                            f"received only {len(estimator_variances)} of 10 samples"
+                        )
+                    raise RuntimeError(
+                        "Kalman estimator variance did not stabilize within 20 s"
+                    )
+                rclpy.spin_once(node, timeout_sec=0.10)
+            print(
+                "Kalman estimator variance is stable: "
+                f"{estimator_variances[-1]}",
+                flush=True,
+            )
+
         hard_failures = (
             "locked:",
             "tumbled:",
@@ -166,73 +238,124 @@ def _run_sequence(launch_process: subprocess.Popen) -> None:
             "hard geofence",
             "separation violation",
             "battery below threshold",
+            "implausible pose speed",
+            "raw marker count",
         )
-        startup_deadline = time.monotonic() + 60.0
-        last_reason = ""
-        while True:
-            _spin_for(node, 1.0, lambda: safety_action)
-            response = _call(node, enable, SetBool.Request(data=True))
-            print(
-                f"ENABLE success={response.success}: {response.message}",
-                flush=True,
-            )
-            if response.success:
-                break
-            last_reason = response.message
-            if any(reason in last_reason for reason in hard_failures):
-                raise RuntimeError(f"gateway refused enable: {last_reason}")
-            if time.monotonic() >= startup_deadline:
+
+        def enable_when_ready() -> None:
+            startup_deadline = time.monotonic() + 60.0
+            telemetry_restart_deadline = time.monotonic() + TELEMETRY_RESTART_S
+            last_reason = ""
+            while True:
+                _spin_for(node, 1.0, lambda: safety_action)
+                response = _call(node, enable, SetBool.Request(data=True))
+                print(
+                    f"ENABLE success={response.success}: {response.message}",
+                    flush=True,
+                )
+                if response.success:
+                    return
+                last_reason = response.message
+                if any(reason in last_reason for reason in hard_failures):
+                    raise RuntimeError(f"gateway refused enable: {last_reason}")
+                if (
+                    time.monotonic() >= telemetry_restart_deadline
+                    and (
+                        "missing status" in last_reason
+                        or "missing battery" in last_reason
+                    )
+                ):
+                    raise RuntimeError(
+                        f"startup telemetry unavailable: {last_reason}"
+                    )
+                if time.monotonic() >= startup_deadline:
+                    raise RuntimeError(
+                        f"gateway did not become ready within 60 s: {last_reason}"
+                    )
+
+        enable_when_ready()
+
+        def takeoff(names: tuple[str, ...]) -> None:
+            futures = []
+            for name in names:
+                request = Takeoff.Request()
+                request.group_mask = 0
+                request.height = 0.30
+                request.duration = Duration(sec=3)
+                futures.append((name, takeoff_clients[name].call_async(request)))
+            deadline = time.monotonic() + 3.0
+            expected = set(names)
+            while (
+                any(not future.done() for _, future in futures)
+                or not expected <= accepted_takeoffs | rejected_takeoffs
+            ) and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            if not expected <= accepted_takeoffs:
                 raise RuntimeError(
-                    f"gateway did not become ready within 60 s: {last_reason}"
+                    "takeoff was not accepted for every requested robot; "
+                    f"requested={sorted(expected)}, "
+                    f"accepted={sorted(accepted_takeoffs)}, "
+                    f"rejected={sorted(rejected_takeoffs)}"
                 )
 
-        takeoff_futures = []
-        for name, client in takeoff_clients.items():
-            request = Takeoff.Request()
-            request.group_mask = 0
-            request.height = 0.30
-            request.duration = Duration(sec=3)
-            takeoff_futures.append((name, client.call_async(request)))
-        deadline = time.monotonic() + 3.0
-        while (
-            any(not future.done() for _, future in takeoff_futures)
-            or len(accepted_takeoffs | rejected_takeoffs) < len(EXPECTED_ROBOTS)
-        ) and time.monotonic() < deadline:
-            rclpy.spin_once(node, timeout_sec=0.05)
-        if accepted_takeoffs != set(EXPECTED_ROBOTS):
-            raise RuntimeError(
-                "not all takeoffs were accepted; accepted="
-                f"{sorted(accepted_takeoffs)}, rejected={sorted(rejected_takeoffs)}"
-            )
-
-        print("All selected takeoffs accepted; 3 s climb + 5 s hover", flush=True)
-        _spin_for(node, 8.0, lambda: safety_action)
-        if safety_action:
-            print("Gateway ended the flight; skipping duplicate landing", flush=True)
-            _spin_for(node, 1.5, lambda: False)
-        else:
-            land_futures = []
-            for name, client in land_clients.items():
+        def land(names: tuple[str, ...]) -> None:
+            futures = []
+            for name in names:
                 request = Land.Request()
                 request.group_mask = 0
                 request.height = 0.04
                 request.duration = Duration(sec=1)
-                land_futures.append((name, client.call_async(request)))
+                futures.append((name, land_clients[name].call_async(request)))
             deadline = time.monotonic() + 3.0
+            expected = set(names)
             while (
-                any(not future.done() for _, future in land_futures)
-                or len(accepted_landings) < len(EXPECTED_ROBOTS)
+                any(not future.done() for _, future in futures)
+                or not expected <= accepted_landings
             ) and time.monotonic() < deadline:
                 rclpy.spin_once(node, timeout_sec=0.05)
-            if accepted_landings != set(EXPECTED_ROBOTS):
+            if not expected <= accepted_landings:
                 if emergency.service_is_ready():
                     emergency.call_async(Stop.Request())
                 raise RuntimeError(
-                    "not all landings were accepted; emergency requested; accepted="
-                    f"{sorted(accepted_landings)}"
+                    "landing was not accepted for every requested robot; "
+                    f"requested={sorted(expected)}, "
+                    f"accepted={sorted(accepted_landings)}"
                 )
-            print("All selected landings accepted", flush=True)
-            _spin_for(node, 1.5, lambda: False)
+
+        if synchronized or len(EXPECTED_ROBOTS) == 1:
+            takeoff(EXPECTED_ROBOTS)
+            print(
+                "All selected takeoffs accepted; 3 s climb + 5 s hover",
+                flush=True,
+            )
+            _spin_for(node, 8.0, lambda: safety_action)
+            if safety_action:
+                print(
+                    "Gateway ended the flight; skipping duplicate landing",
+                    flush=True,
+                )
+                _spin_for(node, 1.5, lambda: False)
+            else:
+                land(EXPECTED_ROBOTS)
+                print("All selected landings accepted", flush=True)
+                _spin_for(node, 1.5, lambda: False)
+        else:
+            for index, name in enumerate(EXPECTED_ROBOTS):
+                print(f"STAGED {name}: takeoff, 3 s climb + 2 s hover", flush=True)
+                takeoff((name,))
+                _spin_for(node, 5.0, lambda: safety_action)
+                if safety_action:
+                    print(
+                        f"Gateway ended staged flight for {name}; aborting sequence",
+                        flush=True,
+                    )
+                    _spin_for(node, 1.5, lambda: False)
+                    return
+                land((name,))
+                print(f"STAGED {name}: landing accepted", flush=True)
+                _spin_for(node, 1.5, lambda: False)
+                if index + 1 < len(EXPECTED_ROBOTS):
+                    enable_when_ready()
     finally:
         with _ignore_cleanup_interrupts():
             if enable.service_is_ready():
@@ -271,7 +394,17 @@ def main(argv: list[str] | None = None) -> int:
         for name in EXPECTED_ROBOTS:
             robot = fleet.enabled[name]
             print(f"  {name}: {robot.uri}, start={robot.initial_position}")
-        print("Sequence: synchronized 0.30 m takeoff over 3 s, 5 s hover, 1 s landing")
+        if args.synchronized or len(EXPECTED_ROBOTS) == 1:
+            print(
+                "Sequence: synchronized 0.30 m takeoff over 3 s, "
+                "5 s hover, 1 s landing"
+            )
+        else:
+            print(
+                "Sequence: staged cf1-cf4; each performs a 0.30 m takeoff "
+                "over 3 s, 2 s hover, and 1 s landing"
+            )
+        print(f"Experiment telemetry: {Path(args.output_root).resolve()}")
         device, holders, conflicts = describe_status()
         if holders or conflicts:
             print(
@@ -299,21 +432,43 @@ def main(argv: list[str] | None = None) -> int:
                 f"safety_config_file:={enabled_safety}",
                 f"motion_capture_yaml_file:={Path(args.motion_capture).resolve()}",
                 f"server_config_file:={Path(args.server).resolve()}",
+                f"experiment_output_root:={Path(args.output_root).resolve()}",
             ]
-            launch_process = subprocess.Popen(command, start_new_session=True)
-            if args.ros_only:
-                print(
-                    "ROS-only mode is running; gateway remains disabled. "
-                    "Press Ctrl+C to stop.",
-                    flush=True,
-                )
-                while launch_process.poll() is None:
-                    time.sleep(0.25)
-                raise RuntimeError(
-                    f"ROS launch exited unexpectedly with code {launch_process.returncode}"
-                )
-            else:
-                _run_sequence(launch_process)
+            attempts = 1 if args.ros_only else 2
+            for attempt in range(attempts):
+                launch_process = subprocess.Popen(command, start_new_session=True)
+                if args.ros_only:
+                    print(
+                        "ROS-only mode is running; gateway remains disabled. "
+                        "Press Ctrl+C to stop.",
+                        flush=True,
+                    )
+                    while launch_process.poll() is None:
+                        time.sleep(0.25)
+                    raise RuntimeError(
+                        "ROS launch exited unexpectedly with code "
+                        f"{launch_process.returncode}"
+                    )
+                try:
+                    _run_sequence(
+                        launch_process,
+                        synchronized=args.synchronized,
+                    )
+                    break
+                except RuntimeError as exc:
+                    if (
+                        attempt + 1 < attempts
+                        and _is_retryable_telemetry_startup_failure(exc)
+                    ):
+                        print(
+                            "Status telemetry did not initialize; restarting "
+                            "the host ROS/radio connection once",
+                            flush=True,
+                        )
+                        _stop_launch(launch_process)
+                        launch_process = None
+                        continue
+                    raise
         return 0
     except KeyboardInterrupt:
         print(

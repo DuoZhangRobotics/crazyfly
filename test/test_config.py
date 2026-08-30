@@ -84,6 +84,22 @@ def test_hardware_configuration_requires_explicit_flight_enable(
         )
 
 
+def test_hardware_configuration_requires_raw_marker_count(
+    tmp_path: Path,
+) -> None:
+    motion = yaml.safe_load((ROOT / "config" / "motion_capture.yaml").read_text())
+    motion["/motion_capture_tracking"]["ros__parameters"]["hostname"] = "192.0.2.1"
+    motion_path = tmp_path / "motion.yaml"
+    motion_path.write_text(yaml.safe_dump(motion))
+
+    with pytest.raises(ConfigError, match="expected_raw_marker_count"):
+        validate_hardware_configuration(
+            str(ROOT / "config" / "mock_crazyflies.yaml"),
+            str(ROOT / "config" / "mock_safety.yaml"),
+            str(motion_path),
+        )
+
+
 def test_official_optitrack_backend_is_supported(tmp_path: Path) -> None:
     motion = yaml.safe_load((ROOT / "config" / "motion_capture.yaml").read_text())
     parameters = motion["/motion_capture_tracking"]["ros__parameters"]
@@ -170,6 +186,36 @@ def test_non_finite_safety_limit_is_rejected(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump(source))
 
     with pytest.raises(ConfigError, match="finite number"):
+        load_safety(path)
+
+
+def test_invalid_raw_marker_count_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source["crazyfly_safety"]["tracking"]["expected_raw_marker_count"] = 0
+    path = tmp_path / "bad_marker_count.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="positive integer"):
+        load_safety(path)
+
+
+def test_identity_timeout_cannot_precede_pose_rejection(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source["crazyfly_safety"]["tracking"]["pose_identity_emergency_s"] = 0.05
+    path = tmp_path / "bad_identity_timeout.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="between pose reject"):
+        load_safety(path)
+
+
+def test_invalid_pose_speed_action_is_rejected(tmp_path: Path) -> None:
+    source = yaml.safe_load((ROOT / "config" / "mock_safety.yaml").read_text())
+    source["crazyfly_safety"]["tracking"]["pose_speed_action"] = "ignore"
+    path = tmp_path / "bad_pose_speed_action.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="land or emergency"):
         load_safety(path)
 
 

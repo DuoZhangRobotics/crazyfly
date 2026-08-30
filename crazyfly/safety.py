@@ -42,6 +42,9 @@ class RobotHealth:
     pose_received_at: float | None = None
     status_received_at: float | None = None
     position: tuple[float, float, float] | None = None
+    pose_speed_m_s: float | None = None
+    pose_speed_fault_at: float | None = None
+    pose_speed_fault_m_s: float | None = None
     battery_voltage: float | None = None
     supervisor_info: int = 0
 
@@ -62,6 +65,9 @@ class SafetyMachine:
     health: dict[str, RobotHealth] = field(default_factory=dict)
     operator_enabled: bool = False
     healthy_since: float | None = None
+    raw_marker_count: int | None = None
+    raw_marker_count_received_at: float | None = None
+    raw_marker_fault_since: float | None = None
     _land_requested: bool = False
     _takeoff_requested: set[str] = field(default_factory=set)
 
@@ -73,8 +79,30 @@ class SafetyMachine:
     ) -> None:
         if name in self.health:
             values = tuple(float(value) for value in position)
-            self.health[name].pose_received_at = received_at
-            self.health[name].position = values  # type: ignore[assignment]
+            item = self.health[name]
+            if (
+                item.pose_received_at is not None
+                and item.position is not None
+                and received_at > item.pose_received_at
+            ):
+                item.pose_speed_m_s = dist(item.position, values) / (
+                    received_at - item.pose_received_at
+                )
+                maximum = self.config.maximum_pose_speed_m_s
+                if maximum is not None and item.pose_speed_m_s > maximum:
+                    item.pose_speed_fault_at = received_at
+                    item.pose_speed_fault_m_s = item.pose_speed_m_s
+            item.pose_received_at = received_at
+            item.position = values  # type: ignore[assignment]
+
+    def record_raw_marker_count(self, count: int, received_at: float) -> None:
+        self.raw_marker_count = int(count)
+        self.raw_marker_count_received_at = received_at
+        expected = self.config.expected_raw_marker_count
+        if expected is None or self.raw_marker_count == expected:
+            self.raw_marker_fault_since = None
+        elif self.raw_marker_fault_since is None:
+            self.raw_marker_fault_since = received_at
 
     def record_status(
         self, name: str, voltage: float, supervisor_info: int, received_at: float
@@ -184,6 +212,72 @@ class SafetyMachine:
         )
 
         if self.state in {SafetyState.FLYING, SafetyState.LANDING}:
+            marker_faults = [
+                reason
+                for reason in reasons
+                if reason.startswith(
+                    (
+                        "missing raw marker",
+                        "stale raw marker",
+                        "raw marker count",
+                    )
+                )
+            ]
+            if (
+                marker_faults
+                and self._raw_marker_fault_duration(now)
+                >= self.config.marker_count_grace_s
+            ):
+                self.mark_emergency()
+                return Evaluation(
+                    self.state,
+                    SafetyAction.EMERGENCY,
+                    tuple(marker_faults),
+                    False,
+                )
+
+            pose_jump_faults = [
+                reason
+                for reason in reasons
+                if reason.startswith("implausible pose speed")
+            ]
+            if pose_jump_faults and self.state is SafetyState.FLYING:
+                if self.config.pose_speed_action == "emergency":
+                    self.mark_emergency()
+                    return Evaluation(
+                        self.state,
+                        SafetyAction.EMERGENCY,
+                        tuple(pose_jump_faults),
+                        False,
+                    )
+                self.state = SafetyState.LANDING
+                if not self._land_requested:
+                    self._land_requested = True
+                    return Evaluation(
+                        self.state,
+                        SafetyAction.LAND,
+                        tuple(pose_jump_faults),
+                        False,
+                    )
+
+            identity_timeout = self.config.pose_identity_emergency_age_s
+            if (
+                identity_timeout is not None
+                and maximum_pose_age >= identity_timeout
+            ):
+                lost = tuple(
+                    f"tracking identity lost: {name}"
+                    for name, item in self.health.items()
+                    if item.pose_received_at is None
+                    or now - item.pose_received_at >= identity_timeout
+                )
+                self.mark_emergency()
+                return Evaluation(
+                    self.state,
+                    SafetyAction.EMERGENCY,
+                    lost,
+                    False,
+                )
             if maximum_pose_age >= self.config.pose_emergency_age_s:
                 self.mark_emergency()
                 return Evaluation(
@@ -324,14 +418,47 @@ class SafetyMachine:
             for item in self.health.values()
         ]
 
+    def _raw_marker_fault_duration(self, now: float) -> float:
+        if self.config.expected_raw_marker_count is None:
+            return 0.0
+        received_at = self.raw_marker_count_received_at
+        if received_at is None:
+            return float("inf")
+        if now - received_at >= self.config.pose_reject_age_s:
+            return now - received_at - self.config.pose_reject_age_s
+        if self.raw_marker_count != self.config.expected_raw_marker_count:
+            if self.raw_marker_fault_since is None:
+                return 0.0
+            return now - self.raw_marker_fault_since
+        return 0.0
+
     def _health_reasons(self, now: float, preflight: bool) -> list[str]:
         reasons: list[str] = []
         positions: list[tuple[str, tuple[float, float, float]]] = []
+        expected_markers = self.config.expected_raw_marker_count
+        if expected_markers is not None:
+            if self.raw_marker_count_received_at is None:
+                reasons.append("missing raw marker count")
+            elif now - self.raw_marker_count_received_at >= self.config.pose_reject_age_s:
+                reasons.append("stale raw marker count")
+            elif self.raw_marker_count != expected_markers:
+                reasons.append(
+                    "raw marker count mismatch: "
+                    f"expected {expected_markers}, got {self.raw_marker_count}"
+                )
         for name, item in self.health.items():
             if item.pose_received_at is None:
                 reasons.append(f"missing pose for {name}")
             elif now - item.pose_received_at >= self.config.pose_reject_age_s:
                 reasons.append(f"stale pose for {name}")
+            if (
+                item.pose_speed_fault_at is not None
+                and now - item.pose_speed_fault_at < self.config.recovery_time_s
+            ):
+                reasons.append(
+                    f"implausible pose speed: {name} "
+                    f"({item.pose_speed_fault_m_s:.2f} m/s)"
+                )
             if item.status_received_at is None:
                 reasons.append(f"missing status for {name}")
             elif now - item.status_received_at >= self.config.status_stale_age_s:

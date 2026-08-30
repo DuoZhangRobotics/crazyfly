@@ -1,6 +1,6 @@
 # Crazyflie + OptiTrack Swarm: Status and Next Plan
 
-Last updated: 2026-08-29
+Last updated: 2026-08-30
 Repository: <https://github.com/DuoZhangRobotics/crazyfly>  
 Target: five or more Crazyflie 2.x vehicles using OptiTrack feedback and
 Crazyswarm2 on ROS 2 Jazzy.
@@ -12,6 +12,19 @@ stationary physical Crazyswarm2 launch has now passed with one Crazyflie, the
 Crazyradio PA, and live single-marker OptiTrack feedback. The safety gateway
 reached `READY`, while `operator_enabled` and `commands_allowed` remained false.
 No enable, takeoff, or motor command was sent, and nothing was flown.
+
+Subsequent one-aircraft hover tests passed for radio addresses 01-04. The first
+synchronized four-aircraft attempt failed when multiple single-marker tracks
+were lost and two aircraft diverged laterally. A motors-off identity test then
+confirmed the physical 01-04 mappings after swapping the positions of 03 and
+04, and reproduced the tracker failure mode: after an occlusion, a surviving
+marker can migrate to another rigid-body name unless the tracker is restarted.
+
+The hardware gateway now requires the exact raw marker count, detects
+implausible name-position jumps, and emergency-stops on a 0.10-second identity
+loss. Four-aircraft execution defaults to staged one-at-a-time takeoffs, and
+physical launches automatically preserve base-frame telemetry. Synchronized
+takeoff requires an additional explicit flag and has not been reattempted.
 
 ## 2. Installed environment
 
