@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from crazyfly.config import ConfigError, load_safety, point_in_geofence_frame
+from crazyfly.config import (
+    ConfigError,
+    load_safety,
+    point_from_geofence_frame,
+    point_in_geofence_frame,
+)
 from crazyfly.safety import SafetyMachine
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +56,9 @@ def test_base_geofence_transforms_world_pose_before_checks(tmp_path: Path) -> No
     assert safety.geofence_frame == "base"
     assert point_in_geofence_frame((0.25, 0.0, 0.5), safety) == pytest.approx(
         (0.25, -1.0, 0.5)
+    )
+    assert point_from_geofence_frame((0.25, -1.0, 0.5), safety) == pytest.approx(
+        (0.25, 0.0, 0.5)
     )
     machine = SafetyMachine(safety, ("cf1",))
     assert machine._inside_live_soft_fence((0.25, 0.0, 0.5))

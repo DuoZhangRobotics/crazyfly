@@ -1,5 +1,6 @@
 import signal
 import sys
+import logging
 from pathlib import Path
 
 import pytest
@@ -8,9 +9,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-import crazyradio_guard
-import four_drone_hover
-import one_drone_hover
+import crazyradio_guard  # noqa: E402
+import fleet_battery  # noqa: E402
+import four_drone_hover  # noqa: E402
+import one_drone_hover  # noqa: E402
 
 
 def test_crazyradio_holder_parsing_is_pid_only() -> None:
@@ -23,6 +25,50 @@ def test_only_known_lab_processes_are_eligible_for_release() -> None:
     )
     assert crazyradio_guard.is_known_crazyflie_process("python -m cfclient.gui")
     assert not crazyradio_guard.is_known_crazyflie_process("python important_job.py")
+
+
+@pytest.mark.parametrize(
+    ("voltage", "expected"),
+    [
+        (4.1, "READY"),
+        (3.6, "LOW"),
+        (3.2, "LOW"),
+        (3.0, "CRITICAL"),
+        (float("nan"), "INVALID"),
+    ],
+)
+def test_fleet_battery_classification(voltage: float, expected: str) -> None:
+    assert fleet_battery.classify_voltage(voltage, 3.6, 3.0) == expected
+
+
+def test_fleet_battery_table_preserves_offline_drones() -> None:
+    readings = [
+        fleet_battery.BatteryReading("cf1", "radio://0/80/2M/E7E7E7E701", 4.1),
+        fleet_battery.BatteryReading(
+            "cf2", "radio://0/80/2M/E7E7E7E702", error="connection timed out"
+        ),
+    ]
+
+    table = fleet_battery.render_table(readings, 3.6, 3.0)
+
+    assert "cf1" in table and "4.10 V" in table and "READY" in table
+    assert "cf2" in table and "OFFLINE" in table and "connection timed out" in table
+
+
+def test_fleet_battery_hides_only_stale_log_entry_warnings() -> None:
+    message_filter = fleet_battery.StaleLogEntryFilter()
+
+    stale = logging.LogRecord(
+        "cflib.crazyflie.log", logging.WARNING, "", 0,
+        "Error no LogEntry to handle id=%d", (1,), None
+    )
+    useful = logging.LogRecord(
+        "cflib.crazyflie.log", logging.WARNING, "", 0,
+        "radio disconnected", (), None
+    )
+
+    assert not message_filter.filter(stale)
+    assert message_filter.filter(useful)
 
 
 def test_drone_index_selects_only_matching_fleet_entry(

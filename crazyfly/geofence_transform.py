@@ -115,3 +115,19 @@ def transform_point(
         + matrix[row][3]
         for row in range(3)
     )  # type: ignore[return-value]
+
+
+def inverse_transform_point(
+    matrix: Matrix4, point: Sequence[float]
+) -> tuple[float, float, float]:
+    """Apply the inverse of a rigid homogeneous transform to a point."""
+    if len(point) != 3:
+        raise GeofenceTransformError("point must contain three values")
+    values = tuple(float(value) for value in point)
+    if not all(isfinite(value) for value in values):
+        raise GeofenceTransformError("point must contain three finite values")
+    translated = tuple(values[row] - matrix[row][3] for row in range(3))
+    return tuple(
+        sum(matrix[row][column] * translated[row] for row in range(3))
+        for column in range(3)
+    )  # type: ignore[return-value]

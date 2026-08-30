@@ -24,7 +24,24 @@ The hardware gateway now requires the exact raw marker count, detects
 implausible name-position jumps, and emergency-stops on a 0.10-second identity
 loss. Four-aircraft execution defaults to staged one-at-a-time takeoffs, and
 physical launches automatically preserve base-frame telemetry. Synchronized
-takeoff requires an additional explicit flag and has not been reattempted.
+takeoff requires an additional explicit flag.
+
+The synchronized hover and the all-four staged sequence have subsequently
+passed. Atomic coordinated movement is implemented with two modes: an 8 cm
+formation translation-and-return and a four-step cyclic position permutation.
+Both use UR-base targets, exact continuous-path separation validation,
+all-estimator readiness, 0.5-second dwell, target-error verification, and
+automatic landing on failure.
+
+The synchronized 8 cm hardware translation-and-return passed on 2026-08-30.
+Both atomic batches were accepted, outbound and return target errors were at
+most 2.5 cm and 3.1 cm, respectively, and measured separation remained at
+least 30.7 cm. All four landings and disarms completed with no safety event.
+The first attempt exposed and safely stopped on a battery-warning logic error:
+the warning threshold had blocked a new motion command after takeoff. Battery
+warning is now a preflight gate only; the configured critical threshold remains
+the in-flight controlled-landing threshold. The cyclic permutation remains the
+next physical movement test.
 
 ## 2. Installed environment
 

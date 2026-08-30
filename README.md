@@ -38,6 +38,10 @@ continuous one-second recovery interval before it will enable commands.
 | Maximum commanded speed | 0.25 m/s |
 | Minimum robot separation | 0.40 m |
 
+The warning voltage blocks preflight. Once a flight has started, crossing the
+warning voltage does not reject subsequent motion commands; reaching the
+critical voltage requests a controlled landing.
+
 A tumble, supervisor lock, hard geofence breach, or live separation violation
 causes an immediate emergency stop. The committed `config/crazyflies.yaml` has
 all robots disabled, `config/safety.yaml` has `flight_enabled: false`, and
@@ -69,6 +73,16 @@ environment, and the installed project package with one command:
 ```sh
 source /home/duo/crazyfly/tools/activate_ros.sh
 ```
+
+Read the resting battery voltage of every enabled drone with one safe command:
+
+```sh
+/home/duo/crazyfly/tools/battery_status
+```
+
+The command reads the configured radio addresses sequentially, never arms a
+drone, reports offline aircraft without hiding the others, and uses the warning
+and critical thresholds from the reviewed local safety profile.
 
 The helper activates `/home/duo/ros2_ws/.venv` and routes `colcon` through that
 interpreter, ensuring rebuilt project executables keep a virtual-environment
@@ -227,6 +241,27 @@ requested explicitly:
 ```sh
 python tools/four_drone_hover.py --execute --synchronized
 ```
+
+The first synchronized translation test moves the full formation 8 cm along
+UR-base +X over two seconds, dwells for 0.5 seconds, returns, and lands:
+
+```sh
+python tools/four_drone_hover.py --execute --synchronized --movement translate
+```
+
+After that passes, the cyclic permutation moves each drone to the next drone's
+captured takeoff position over 2.5 seconds, dwells for 0.5 seconds, repeats
+four times, and lands:
+
+```sh
+python tools/four_drone_hover.py --execute --synchronized --movement cycle
+```
+
+Movement requests are submitted to the safety gateway as one atomic
+base-frame batch. The gateway converts targets to Motive world, validates
+geofence and speed limits, computes exact continuous pairwise separation for
+all linear paths, checks every upstream service, and only then dispatches the
+full batch. Every step verifies that all drones settled within 8 cm.
 
 ## Experiment logging
 

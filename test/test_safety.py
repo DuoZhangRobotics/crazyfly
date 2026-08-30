@@ -1,6 +1,8 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from crazyfly.config import load_safety
 from crazyfly.safety import (
     CAN_BE_ARMED,
@@ -11,6 +13,7 @@ from crazyfly.safety import (
     SafetyAction,
     SafetyMachine,
     SafetyState,
+    continuous_minimum_separation,
 )
 
 
@@ -93,6 +96,8 @@ def test_persistent_raw_marker_loss_emergency_stops_before_reassignment() -> Non
     persistent = machine.evaluate(1.08)
 
     assert transient.action is SafetyAction.NONE
+    assert transient.commands_allowed
+    assert transient.reasons == ()
     assert persistent.action is SafetyAction.EMERGENCY
     assert persistent.reasons == ("raw marker count mismatch: expected 2, got 1",)
 
@@ -196,7 +201,7 @@ def test_commands_wait_for_recovery_after_a_brief_tracking_fault() -> None:
     assert machine.evaluate(2.14).commands_allowed
 
 
-def test_battery_warning_blocks_commands_without_forcing_a_land() -> None:
+def test_battery_warning_does_not_block_commands_during_flight() -> None:
     machine = _ready_machine()
     machine.mark_flying()
     machine.record_pose("cf1", (0.0, 0.0, 0.3), 1.02)
@@ -206,7 +211,23 @@ def test_battery_warning_blocks_commands_without_forcing_a_land() -> None:
 
     assert result.action is SafetyAction.NONE
     assert result.state is SafetyState.FLYING
-    assert not result.commands_allowed
+    assert result.commands_allowed
+
+
+def test_battery_warning_blocks_preflight() -> None:
+    machine = SafetyMachine(
+        load_safety(ROOT / "config" / "mock_safety.yaml"), ("cf1",)
+    )
+    machine.record_pose("cf1", (0.0, 0.0, 0.0), 0.0)
+    machine.record_status("cf1", 3.75, SUPERVISOR_READY, 0.0)
+
+    success, reasons = machine.preflight(0.0)
+
+    assert not success
+    assert reasons == (
+        "battery below threshold for cf1",
+        "healthy recovery interval has not completed",
+    )
 
 
 def test_invalid_battery_requests_a_controlled_land() -> None:
@@ -300,7 +321,8 @@ def test_inactive_staged_drone_critical_battery_does_not_land_active() -> None:
 
     assert result.action is SafetyAction.NONE
     assert result.state is SafetyState.FLYING
-    assert "battery below threshold for cf2" in result.reasons
+    assert result.reasons == ()
+    assert result.commands_allowed
 
 
 def test_tumble_is_an_immediate_hard_stop() -> None:
@@ -349,3 +371,74 @@ def test_command_limits_and_separation_are_enforced() -> None:
     assert not machine.validate_goto("cf1", (float("nan"), 0.0, 0.3), 1.0)[0]
     assert not machine.validate_goto("cf1", (0.1, 0.0, 0.3), float("nan"))[0]
     assert machine.validate_goto("cf1", (0.1, 0.0, 0.3), 1.0)[0]
+
+
+def _coordinated_square_machine() -> SafetyMachine:
+    names = ("cf1", "cf2", "cf3", "cf4")
+    positions = {
+        "cf1": (0.4, 0.4, 0.3),
+        "cf2": (-0.4, 0.4, 0.3),
+        "cf3": (-0.4, -0.4, 0.3),
+        "cf4": (0.4, -0.4, 0.3),
+    }
+    config = replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        minimum_separation_m=0.15,
+    )
+    machine = SafetyMachine(config, names)
+    _record_healthy(machine, 0.0, positions)
+    machine.evaluate(0.0)
+    _record_healthy(machine, 1.01, positions)
+    machine.evaluate(1.01)
+    assert machine.enable(1.01)[0]
+    for name in names:
+        machine.mark_flying(name)
+    return machine
+
+
+def test_coordinated_cycle_validates_continuous_separation() -> None:
+    machine = _coordinated_square_machine()
+    names = machine.robot_names
+    starts = {name: machine.health[name].position for name in names}
+    goals = {
+        name: starts[names[(index + 1) % len(names)]]
+        for index, name in enumerate(names)
+    }
+
+    accepted, reason, minimum = machine.validate_coordinated_goto(goals, 4.0)
+
+    assert accepted, reason
+    assert minimum == pytest.approx(2**0.5 * 0.4)
+    assert not machine.validate_goto("cf1", goals["cf1"], 4.0)[0]
+
+
+def test_coordinated_head_on_swap_is_rejected_between_endpoints() -> None:
+    starts = {"cf1": (-0.5, 0.0, 0.3), "cf2": (0.5, 0.0, 0.3)}
+    goals = {"cf1": starts["cf2"], "cf2": starts["cf1"]}
+
+    minimum, pair, fraction = continuous_minimum_separation(starts, goals)
+
+    assert minimum == pytest.approx(0.0)
+    assert pair == ("cf1", "cf2")
+    assert fraction == pytest.approx(0.5)
+
+
+def test_coordinated_translation_preserves_separation() -> None:
+    starts = {"cf1": (0.0, 0.0, 0.3), "cf2": (0.4, 0.0, 0.3)}
+    goals = {"cf1": (0.08, 0.0, 0.3), "cf2": (0.48, 0.0, 0.3)}
+
+    minimum, pair, _fraction = continuous_minimum_separation(starts, goals)
+
+    assert minimum == pytest.approx(0.4)
+    assert pair == ("cf1", "cf2")
+
+
+def test_single_robot_coordinated_path_has_infinite_separation() -> None:
+    minimum, pair, fraction = continuous_minimum_separation(
+        {"cf1": (0.0, 0.0, 0.3)},
+        {"cf1": (0.08, 0.0, 0.3)},
+    )
+
+    assert minimum == float("inf")
+    assert pair == ("cf1", "cf1")
+    assert fraction == 0.0

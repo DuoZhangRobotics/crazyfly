@@ -19,7 +19,11 @@ from pathlib import Path
 import yaml
 from crazyradio_guard import describe_status, ensure_crazyradio_free
 
-from crazyfly.config import ConfigError
+from crazyfly.config import (
+    ConfigError,
+    SafetyConfig,
+    point_in_geofence_frame,
+)
 from crazyfly.config_validator import validate
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +71,12 @@ def _parser() -> argparse.ArgumentParser:
         "--synchronized",
         action="store_true",
         help="take off all selected drones together instead of staged validation",
+    )
+    parser.add_argument(
+        "--movement",
+        choices=("hover", "translate", "cycle"),
+        default="hover",
+        help="optional synchronized base-frame motion after takeoff",
     )
     parser.add_argument("--fleet", default=str(DEFAULT_FLEET))
     parser.add_argument("--safety", default=str(DEFAULT_SAFETY))
@@ -143,12 +153,18 @@ def _estimator_variance_stable(
 
 
 def _run_sequence(
-    launch_process: subprocess.Popen, *, synchronized: bool = False
+    launch_process: subprocess.Popen,
+    *,
+    safety: SafetyConfig,
+    synchronized: bool = False,
+    movement: str = "hover",
 ) -> None:
     import rclpy
     from builtin_interfaces.msg import Duration
     from crazyflie_interfaces.msg import LogDataGeneric
     from crazyflie_interfaces.srv import Land, Stop, Takeoff
+    from motion_capture_tracking_interfaces.msg import NamedPoseArray
+    from rclpy.qos import qos_profile_sensor_data
     from std_msgs.msg import String
     from std_srvs.srv import SetBool
 
@@ -158,6 +174,9 @@ def _run_sequence(
     accepted_takeoffs: set[str] = set()
     rejected_takeoffs: set[str] = set()
     accepted_landings: set[str] = set()
+    batch_results: dict[str, tuple[str, dict[str, object]]] = {}
+    positions_base: dict[str, tuple[float, float, float]] = {}
+    position_received_at: dict[str, float] = {}
     estimator_variances: dict[
         str, list[tuple[float, float, float]]
     ] = {name: [] for name in EXPECTED_ROBOTS}
@@ -178,8 +197,35 @@ def _run_sequence(
             accepted_landings.add(robot)
         elif command in {"safety_land", "emergency"}:
             safety_action = True
+        elif command == "batch_go_to":
+            try:
+                batch_details = json.loads(details)
+            except json.JSONDecodeError:
+                batch_details = {"reason": details}
+            batch_id = str(batch_details.get("batch_id", "invalid"))
+            batch_results[batch_id] = (status, batch_details)
+
+    def pose_callback(message: NamedPoseArray) -> None:
+        received_at = time.monotonic()
+        for named_pose in message.poses:
+            if named_pose.name in EXPECTED_ROBOTS:
+                position = named_pose.pose.position
+                positions_base[named_pose.name] = point_in_geofence_frame(
+                    (position.x, position.y, position.z),
+                    safety,
+                )
+                position_received_at[named_pose.name] = received_at
 
     node.create_subscription(String, "/crazyfly/commands", event_callback, 10)
+    node.create_subscription(
+        NamedPoseArray,
+        "/poses",
+        pose_callback,
+        qos_profile_sensor_data,
+    )
+    batch_publisher = node.create_publisher(
+        String, "/crazyfly/batch_go_to_requests", 10
+    )
     for name in EXPECTED_ROBOTS:
         def estimator_callback(
             message: LogDataGeneric, robot: str = name
@@ -345,13 +391,139 @@ def _run_sequence(
                     f"accepted={sorted(accepted_landings)}"
                 )
 
-        if synchronized or len(EXPECTED_ROBOTS) == 1:
-            takeoff(EXPECTED_ROBOTS)
+        batch_sequence = 0
+
+        def current_base_positions() -> dict[str, tuple[float, float, float]]:
+            now = time.monotonic()
+            if set(positions_base) != set(EXPECTED_ROBOTS):
+                raise RuntimeError("not all base-frame poses are available")
+            stale = [
+                name
+                for name in EXPECTED_ROBOTS
+                if now - position_received_at.get(name, 0.0)
+                >= safety.pose_reject_age_s
+            ]
+            if stale:
+                raise RuntimeError(
+                    f"base-frame poses are stale for: {', '.join(stale)}"
+                )
+            return dict(positions_base)
+
+        def send_batch(
+            label: str,
+            goals: dict[str, tuple[float, float, float]],
+            *,
+            duration_s: float = 2.0,
+            dwell_s: float = 0.5,
+        ) -> None:
+            nonlocal batch_sequence
+            batch_sequence += 1
+            batch_id = f"{label}-{batch_sequence}"
+            request = String()
+            request.data = json.dumps(
+                {
+                    "batch_id": batch_id,
+                    "frame": safety.geofence_frame,
+                    "duration_s": duration_s,
+                    "yaw_rad": 0.0,
+                    "goals": goals,
+                },
+                separators=(",", ":"),
+            )
+            batch_publisher.publish(request)
+            deadline = time.monotonic() + 3.0
+            while batch_id not in batch_results and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            if batch_id not in batch_results:
+                raise RuntimeError(f"batch {batch_id} was not acknowledged")
+            status, details = batch_results[batch_id]
+            if status != "accepted":
+                raise RuntimeError(
+                    f"batch {batch_id} rejected: "
+                    f"{details.get('reason', details)}"
+                )
             print(
-                "All selected takeoffs accepted; 3 s climb + 5 s hover",
+                f"BATCH {batch_id} accepted; predicted minimum separation "
+                f"{float(details['minimum_separation_m']):.3f} m",
                 flush=True,
             )
-            _spin_for(node, 8.0, lambda: safety_action)
+            _spin_for(
+                node,
+                duration_s + dwell_s,
+                lambda: safety_action,
+            )
+            if safety_action:
+                raise RuntimeError(f"safety gateway stopped batch {batch_id}")
+            actual = current_base_positions()
+            errors = {
+                name: sum(
+                    (actual[name][axis] - goals[name][axis]) ** 2
+                    for axis in range(3)
+                )
+                ** 0.5
+                for name in EXPECTED_ROBOTS
+            }
+            failed = {
+                name: error for name, error in errors.items() if error > 0.08
+            }
+            if failed:
+                raise RuntimeError(
+                    f"batch {batch_id} target error exceeded 0.08 m: {failed}"
+                )
+            print(
+                f"BATCH {batch_id} settled; maximum target error "
+                f"{max(errors.values()):.3f} m",
+                flush=True,
+            )
+
+        def execute_movement() -> None:
+            if safety.geofence_frame != "base":
+                raise RuntimeError(
+                    "synchronized movement requires a base-frame geofence"
+                )
+            original = current_base_positions()
+            if movement == "translate":
+                outbound = {
+                    name: (
+                        position[0] + 0.08,
+                        position[1],
+                        position[2],
+                    )
+                    for name, position in original.items()
+                }
+                send_batch("translate-out", outbound)
+                send_batch("translate-return", original)
+            elif movement == "cycle":
+                names = tuple(EXPECTED_ROBOTS)
+                for step in range(1, len(names) + 1):
+                    goals = {
+                        name: original[names[(index + step) % len(names)]]
+                        for index, name in enumerate(names)
+                    }
+                    send_batch(f"cycle-{step}", goals, duration_s=2.5)
+
+        if synchronized or len(EXPECTED_ROBOTS) == 1:
+            takeoff(EXPECTED_ROBOTS)
+            if movement == "hover":
+                print(
+                    "All selected takeoffs accepted; 3 s climb + 5 s hover",
+                    flush=True,
+                )
+                _spin_for(node, 8.0, lambda: safety_action)
+            else:
+                print(
+                    "All selected takeoffs accepted; 3 s climb + 0.5 s settle",
+                    flush=True,
+                )
+                _spin_for(node, 3.5, lambda: safety_action)
+                if not safety_action:
+                    try:
+                        execute_movement()
+                    except RuntimeError:
+                        if not safety_action:
+                            land(EXPECTED_ROBOTS)
+                            _spin_for(node, 1.5, lambda: False)
+                        raise
             if safety_action:
                 print(
                     "Gateway ended the flight; skipping duplicate landing",
@@ -413,6 +585,10 @@ def main(argv: list[str] | None = None) -> int:
                 "persistent safety file must remain flight_enabled: false; "
                 "this tool uses a temporary enabled copy"
             )
+        if args.movement != "hover" and not args.synchronized:
+            raise ConfigError(
+                "movement modes require --synchronized"
+            )
         print("PASS: selected-fleet configuration is valid")
         for name in EXPECTED_ROBOTS:
             robot = fleet.enabled[name]
@@ -420,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.synchronized or len(EXPECTED_ROBOTS) == 1:
             print(
                 "Sequence: synchronized 0.30 m takeoff over 3 s, "
-                "5 s hover, 1 s landing"
+                f"{args.movement} motion, 1 s landing"
             )
         else:
             print(
@@ -475,7 +651,9 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     _run_sequence(
                         launch_process,
+                        safety=safety,
                         synchronized=args.synchronized,
+                        movement=args.movement,
                     )
                     break
                 except RuntimeError as exc:

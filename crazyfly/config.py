@@ -14,6 +14,7 @@ import yaml
 from .geofence_transform import (
     GeofenceTransformError,
     Matrix4,
+    inverse_transform_point,
     load_base_from_world,
     transform_point,
 )
@@ -388,6 +389,20 @@ def point_in_geofence_frame(
         return values  # type: ignore[return-value]
     try:
         return transform_point(safety.geofence_from_world, values)
+    except GeofenceTransformError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def point_from_geofence_frame(
+    point: Sequence[float], safety: SafetyConfig
+) -> tuple[float, float, float]:
+    values = tuple(float(value) for value in point)
+    if len(values) != 3 or not all(isfinite(value) for value in values):
+        raise ConfigError("geofence point must contain three finite values")
+    if safety.geofence_from_world is None:
+        return values  # type: ignore[return-value]
+    try:
+        return inverse_transform_point(safety.geofence_from_world, values)
     except GeofenceTransformError as exc:
         raise ConfigError(str(exc)) from exc
 

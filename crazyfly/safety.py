@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from math import dist, isfinite
@@ -429,6 +429,61 @@ class SafetyMachine:
                 return False, f"goal violates separation from {other_name}", None
         return True, "accepted", target
 
+    def validate_coordinated_goto(
+        self,
+        goals: Mapping[str, Sequence[float]],
+        duration_s: float,
+    ) -> tuple[bool, str, float | None]:
+        if self.state != SafetyState.FLYING or not self.operator_enabled:
+            return False, "safety gateway is not FLYING", None
+        active = self._active_robot_names() or set(self.robot_names)
+        if set(goals) != active:
+            return (
+                False,
+                "coordinated goals must contain exactly the active robots",
+                None,
+            )
+        if not isfinite(duration_s) or duration_s <= 0:
+            return False, "coordinated duration must be positive and finite", None
+
+        starts: dict[str, tuple[float, float, float]] = {}
+        targets: dict[str, tuple[float, float, float]] = {}
+        for name in sorted(active):
+            current = self.health[name].position
+            if current is None:
+                return False, f"no current pose for {name}", None
+            try:
+                target = tuple(float(value) for value in goals[name])
+            except (TypeError, ValueError) as exc:
+                return False, f"invalid coordinated goal for {name}: {exc}", None
+            if len(target) != 3 or not all(isfinite(value) for value in target):
+                return False, f"invalid coordinated goal for {name}", None
+            if not point_inside_geofence(
+                target,
+                self.config,
+                margin=self.config.soft_geofence_margin_m,
+            ):
+                return False, f"coordinated goal violates geofence: {name}", None
+            if (
+                dist(current, target) / duration_s
+                > self.config.maximum_command_speed_m_s
+            ):
+                return False, f"coordinated goal exceeds speed limit: {name}", None
+            starts[name] = current
+            targets[name] = target  # type: ignore[assignment]
+
+        minimum, pair, _time_fraction = continuous_minimum_separation(
+            starts, targets
+        )
+        if minimum < self.config.minimum_separation_m:
+            return (
+                False,
+                "coordinated paths violate separation: "
+                f"{pair[0]}/{pair[1]} ({minimum:.3f} m)",
+                minimum,
+            )
+        return True, "accepted", minimum
+
     def _ages(self, now: float, attribute: str) -> list[float]:
         return [
             float("inf")
@@ -474,7 +529,14 @@ class SafetyMachine:
                 reasons.append("missing raw marker count")
             elif now - self.raw_marker_count_received_at >= self.config.pose_reject_age_s:
                 reasons.append("stale raw marker count")
-            elif self.raw_marker_count != expected_markers:
+            elif (
+                self.raw_marker_count != expected_markers
+                and (
+                    preflight
+                    or self._raw_marker_fault_duration(now)
+                    >= self.config.marker_count_grace_s
+                )
+            ):
                 reasons.append(
                     "raw marker count mismatch: "
                     f"expected {expected_markers}, got {self.raw_marker_count}"
@@ -501,7 +563,10 @@ class SafetyMachine:
                 reasons.append(f"missing battery for {name}")
             elif not isfinite(item.battery_voltage):
                 reasons.append(f"invalid battery for {name}")
-            elif item.battery_voltage <= self.config.battery_warning_v:
+            elif (
+                preflight
+                and item.battery_voltage <= self.config.battery_warning_v
+            ):
                 reasons.append(f"battery below threshold for {name}")
 
             if item.supervisor_info & IS_TUMBLED:
@@ -569,3 +634,72 @@ def minimum_pairwise_separation(points: Iterable[Sequence[float]]) -> float:
         for index, first in enumerate(values)
         for second in values[index + 1 :]
     )
+
+
+def continuous_minimum_separation(
+    starts: Mapping[str, Sequence[float]],
+    goals: Mapping[str, Sequence[float]],
+) -> tuple[float, tuple[str, str], float]:
+    """Return exact minimum separation for equal-duration linear paths."""
+    if set(starts) != set(goals) or not starts:
+        raise ValueError("continuous separation requires matching robot sets")
+    if len(starts) == 1:
+        name = next(iter(starts))
+        return float("inf"), (name, name), 0.0
+    values = {
+        name: (
+            tuple(float(value) for value in starts[name]),
+            tuple(float(value) for value in goals[name]),
+        )
+        for name in starts
+    }
+    best = (float("inf"), ("", ""), 0.0)
+    names = sorted(values)
+    for index, first_name in enumerate(names):
+        first_start, first_goal = values[first_name]
+        first_velocity = tuple(
+            first_goal[axis] - first_start[axis] for axis in range(3)
+        )
+        for second_name in names[index + 1 :]:
+            second_start, second_goal = values[second_name]
+            second_velocity = tuple(
+                second_goal[axis] - second_start[axis] for axis in range(3)
+            )
+            relative_start = tuple(
+                first_start[axis] - second_start[axis] for axis in range(3)
+            )
+            relative_velocity = tuple(
+                first_velocity[axis] - second_velocity[axis]
+                for axis in range(3)
+            )
+            velocity_norm_sq = sum(value * value for value in relative_velocity)
+            if velocity_norm_sq > 0:
+                time_fraction = max(
+                    0.0,
+                    min(
+                        1.0,
+                        -sum(
+                            relative_start[axis] * relative_velocity[axis]
+                            for axis in range(3)
+                        )
+                        / velocity_norm_sq,
+                    ),
+                )
+            else:
+                time_fraction = 0.0
+            separation = sum(
+                (
+                    relative_start[axis]
+                    + time_fraction * relative_velocity[axis]
+                )
+                ** 2
+                for axis in range(3)
+            ) ** 0.5
+            candidate = (
+                separation,
+                (first_name, second_name),
+                time_fraction,
+            )
+            if candidate < best:
+                best = candidate
+    return best

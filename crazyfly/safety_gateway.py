@@ -21,7 +21,12 @@ from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 from std_srvs.srv import Empty, SetBool, Trigger
 
-from .config import ConfigError, load_fleet, load_safety
+from .config import (
+    ConfigError,
+    load_fleet,
+    load_safety,
+    point_from_geofence_frame,
+)
 from .safety import Evaluation, SafetyAction, SafetyMachine, SafetyState
 
 
@@ -61,6 +66,7 @@ class SafetyGateway(Node):
         )
         self._landing_disarm_at: float | None = None
         self._landing_robots: set[str] = set()
+        self._batch_end_at: float | None = None
         self._last_rejection = ""
 
         self.state_publisher = self.create_publisher(
@@ -78,6 +84,12 @@ class SafetyGateway(Node):
             "/pointCloud",
             self._point_cloud_callback,
             qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            String,
+            "/crazyfly/batch_go_to_requests",
+            self._batch_goto_callback,
+            10,
         )
 
         self.upstream_clients: dict[str, dict[str, object]] = {}
@@ -165,6 +177,7 @@ class SafetyGateway(Node):
             self._send_arm(False)
             self._landing_disarm_at = None
             self._landing_robots.clear()
+            self._batch_end_at = None
             self.machine.disable()
             response.success = True
             self._publish_command(
@@ -259,6 +272,9 @@ class SafetyGateway(Node):
     def _goto_callback(
         self, name: str, request: GoTo.Request, response: GoTo.Response
     ) -> GoTo.Response:
+        if self._batch_end_at is not None and self._now() < self._batch_end_at:
+            self._reject(f"go_to/{name}", "coordinated motion is in progress")
+            return response
         goal = (request.goal.x, request.goal.y, request.goal.z)
         if not self.last_evaluation.commands_allowed:
             reason = "; ".join(self.last_evaluation.reasons) or (
@@ -281,6 +297,106 @@ class SafetyGateway(Node):
         self._publish_command("go_to", "accepted", name, f"goal={goal}")
         self.get_logger().info(f"accepted go_to for {name}")
         return response
+
+    def _batch_goto_callback(self, message: String) -> None:
+        batch_id = "invalid"
+        try:
+            payload = json.loads(message.data)
+            if not isinstance(payload, dict):
+                raise ValueError("request must be a JSON object")
+            raw_batch_id = payload.get("batch_id")
+            if (
+                not isinstance(raw_batch_id, str)
+                or not raw_batch_id
+                or len(raw_batch_id) > 64
+            ):
+                raise ValueError("batch_id must be a non-empty string")
+            batch_id = raw_batch_id
+            if payload.get("frame") != self.safety.geofence_frame:
+                raise ValueError(
+                    "batch frame must match the configured geofence frame"
+                )
+            duration_s = float(payload.get("duration_s"))
+            yaw_rad = float(payload.get("yaw_rad", 0.0))
+            if not isfinite(duration_s) or not isfinite(yaw_rad):
+                raise ValueError("duration and yaw must be finite")
+            raw_goals = payload.get("goals")
+            if not isinstance(raw_goals, dict):
+                raise ValueError("goals must be a JSON object")
+            goals_in_frame: dict[str, tuple[float, float, float]] = {}
+            goals_world: dict[str, tuple[float, float, float]] = {}
+            for name, raw_goal in raw_goals.items():
+                if (
+                    not isinstance(name, str)
+                    or not isinstance(raw_goal, list)
+                    or len(raw_goal) != 3
+                ):
+                    raise ValueError("each goal must contain three coordinates")
+                goal = tuple(float(value) for value in raw_goal)
+                if not all(isfinite(value) for value in goal):
+                    raise ValueError("goal coordinates must be finite")
+                goals_in_frame[name] = goal  # type: ignore[assignment]
+                goals_world[name] = point_from_geofence_frame(goal, self.safety)
+        except (ConfigError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._reject_batch(batch_id, str(exc))
+            return
+
+        now = self._now()
+        if self._batch_end_at is not None and now < self._batch_end_at:
+            self._reject_batch(batch_id, "coordinated motion is already in progress")
+            return
+        if not self.last_evaluation.commands_allowed:
+            reason = "; ".join(self.last_evaluation.reasons) or (
+                f"commands are blocked in {self.machine.state.value}"
+            )
+            self._reject_batch(batch_id, reason)
+            return
+        unavailable = self._unavailable_clients("go_to")
+        if unavailable:
+            self._reject_batch(
+                batch_id,
+                f"go_to service unavailable for: {', '.join(unavailable)}",
+            )
+            return
+        accepted, reason, minimum = self.machine.validate_coordinated_goto(
+            goals_world, duration_s
+        )
+        if not accepted:
+            self._reject_batch(batch_id, reason)
+            return
+
+        requests: list[tuple[str, GoTo.Request]] = []
+        for name in sorted(goals_world):
+            request = GoTo.Request()
+            request.group_mask = 0
+            request.relative = False
+            (
+                request.goal.x,
+                request.goal.y,
+                request.goal.z,
+            ) = goals_world[name]
+            request.yaw = yaw_rad
+            request.duration = duration_message(duration_s)
+            requests.append((name, request))
+        for name, request in requests:
+            self.upstream_clients[name]["go_to"].call_async(request)
+
+        self._batch_end_at = now + duration_s
+        details = json.dumps(
+            {
+                "batch_id": batch_id,
+                "frame": self.safety.geofence_frame,
+                "goals": goals_in_frame,
+                "duration_s": duration_s,
+                "minimum_separation_m": minimum,
+            },
+            separators=(",", ":"),
+        )
+        self._publish_command("batch_go_to", "accepted", details=details)
+        self.get_logger().info(
+            f"accepted coordinated batch {batch_id} "
+            f"(minimum separation {minimum:.3f} m)"
+        )
 
     def _emergency_callback(
         self, _request: Stop.Request, response: Stop.Response
@@ -306,9 +422,12 @@ class SafetyGateway(Node):
             self.machine.disable()
             self._landing_disarm_at = None
             self._landing_robots.clear()
+        if self._batch_end_at is not None and now >= self._batch_end_at:
+            self._batch_end_at = None
         self._publish_health()
 
     def _issue_land(self, reason: str) -> None:
+        self._batch_end_at = None
         self.get_logger().error(f"safety landing: {reason}")
         self._publish_command("safety_land", "requested", details=reason)
         request = Land.Request()
@@ -322,6 +441,7 @@ class SafetyGateway(Node):
         self._landing_disarm_at = self._now() + 1.25
 
     def _issue_emergency(self, reason: str) -> None:
+        self._batch_end_at = None
         self._landing_disarm_at = None
         self._landing_robots.clear()
         if self.machine.state != SafetyState.EMERGENCY:
@@ -376,6 +496,15 @@ class SafetyGateway(Node):
     def _reject(self, command: str, reason: str) -> None:
         self._last_rejection = f"{command}: {reason}"
         self._publish_command(command, "rejected", details=reason)
+        self.get_logger().warning(f"rejected {self._last_rejection}")
+
+    def _reject_batch(self, batch_id: str, reason: str) -> None:
+        details = json.dumps(
+            {"batch_id": batch_id, "reason": reason},
+            separators=(",", ":"),
+        )
+        self._last_rejection = f"batch_go_to/{batch_id}: {reason}"
+        self._publish_command("batch_go_to", "rejected", details=details)
         self.get_logger().warning(f"rejected {self._last_rejection}")
 
     def _publish_health(self) -> None:

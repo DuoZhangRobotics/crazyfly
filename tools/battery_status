@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOLS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname -- "${TOOLS_DIR}")"
+exec "${PROJECT_DIR}/.venv/bin/python" "${TOOLS_DIR}/fleet_battery.py" "$@"
