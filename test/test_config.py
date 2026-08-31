@@ -227,6 +227,19 @@ def test_invalid_pose_speed_action_is_rejected(tmp_path: Path) -> None:
         load_safety(path)
 
 
+@pytest.mark.parametrize("window_s", [0.0, 0.1])
+def test_pose_speed_window_must_be_shorter_than_pose_rejection(
+    tmp_path: Path, window_s: float
+) -> None:
+    source = _mock_safety_source()
+    source["crazyfly_safety"]["tracking"]["pose_speed_window_s"] = window_s
+    path = tmp_path / "bad_pose_speed_window.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="pose_speed_window_s"):
+        load_safety(path)
+
+
 def test_trajectory_separation_cannot_be_below_live_limit(tmp_path: Path) -> None:
     source = _mock_safety_source()
     source["crazyfly_safety"]["limits"][

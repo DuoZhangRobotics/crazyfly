@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import partial
 import hashlib
 import json
@@ -22,7 +23,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import String
 
-from .config import load_fleet, load_safety, point_in_geofence_frame
+from .config import load_fleet, load_safety, load_yaml, point_in_geofence_frame
 
 DEBUG_TOPICS = {
     "estimator_debug": (
@@ -49,6 +50,80 @@ DEBUG_TOPICS = {
         "motor.m4",
     ),
 }
+
+
+def file_record(path: str | Path) -> dict[str, str]:
+    resolved = Path(path).expanduser().resolve()
+    content = resolved.read_bytes()
+    return {"path": str(resolved), "sha256": hashlib.sha256(content).hexdigest()}
+
+
+def calibration_file_record(safety_path: str | Path) -> dict[str, str] | None:
+    resolved_safety = Path(safety_path).expanduser().resolve()
+    data = load_yaml(resolved_safety)
+    safety = data.get("crazyfly_safety")
+    if not isinstance(safety, Mapping):
+        return None
+    geofence = safety.get("geofence")
+    if not isinstance(geofence, Mapping) or geofence.get("frame") != "base":
+        return None
+    transform_file = geofence.get("transform_file")
+    if not isinstance(transform_file, str) or not transform_file.strip():
+        return None
+    transform_path = Path(transform_file).expanduser()
+    if not transform_path.is_absolute():
+        transform_path = resolved_safety.parent / transform_path
+    return file_record(transform_path)
+
+
+def trajectory_record_from_command(data: object) -> dict[str, object] | None:
+    if (
+        not isinstance(data, Mapping)
+        or data.get("command") != "mission_plan"
+        or data.get("status") != "accepted"
+    ):
+        return None
+    details: object = data.get("details")
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("mission_plan details are not valid JSON") from exc
+    if not isinstance(details, Mapping):
+        raise RuntimeError("mission_plan details must be a mapping")
+    trajectory = details.get("trajectory")
+    if not isinstance(trajectory, Mapping):
+        raise RuntimeError("mission_plan does not contain trajectory provenance")
+    path = trajectory.get("path")
+    digest = trajectory.get("sha256")
+    if not isinstance(path, str) or not path:
+        raise RuntimeError("trajectory provenance requires a source path")
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise RuntimeError("trajectory provenance requires a SHA-256 digest")
+    return dict(trajectory)
+
+
+def copy_trajectory_source(
+    run_directory: Path, record: Mapping[str, object]
+) -> dict[str, object]:
+    source = Path(str(record["path"])).expanduser().resolve()
+    content = source.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != record["sha256"]:
+        raise RuntimeError("trajectory source SHA-256 does not match mission plan")
+    suffix = source.suffix.lower()
+    if suffix not in {".json", ".yaml", ".yml"}:
+        suffix = ".bin"
+    destination = run_directory / f"trajectory_source{suffix}"
+    if destination.exists():
+        if destination.read_bytes() != content:
+            raise RuntimeError("a different trajectory source is already recorded")
+    else:
+        destination.write_bytes(content)
+    result = dict(record)
+    result["copied_path"] = str(destination)
+    result["sha256"] = digest
+    return result
 
 
 def raw_marker_event_data(message: PointCloud2, safety) -> dict[str, object]:
@@ -125,15 +200,17 @@ class ExperimentLogger(Node):
             "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "robots": sorted(fleet.enabled),
             "configuration": {
-                "fleet": self._file_record(fleet_path),
-                "safety": self._file_record(safety_path),
+                "fleet": file_record(fleet_path),
+                "safety": file_record(safety_path),
+                "calibration": calibration_file_record(safety_path),
             },
             "record_rosbag": record_rosbag,
             "maximum_duration_s": self.maximum_duration_s,
         }
-        (self.run_directory / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        self.manifest = manifest
+        self.manifest_path = self.run_directory / "manifest.json"
+        self.trajectory_source: dict[str, object] | None = None
+        self._write_manifest()
 
         self.create_subscription(
             NamedPoseArray, "/poses", self._poses_callback, qos_profile_sensor_data
@@ -206,11 +283,11 @@ class ExperimentLogger(Node):
             )
         self.get_logger().info(f"logging experiment to {self.run_directory}")
 
-    @staticmethod
-    def _file_record(path: str) -> dict[str, str]:
-        resolved = Path(path).resolve()
-        content = resolved.read_bytes()
-        return {"path": str(resolved), "sha256": hashlib.sha256(content).hexdigest()}
+    def _write_manifest(self) -> None:
+        self.manifest_path.write_text(
+            json.dumps(self.manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     def _write(self, event: str, data: object) -> None:
         record = {
@@ -288,6 +365,19 @@ class ExperimentLogger(Node):
         except json.JSONDecodeError:
             data = {"raw": message.data}
         self._write("command", data)
+        try:
+            record = trajectory_record_from_command(data)
+            if record is None:
+                return
+            copied = copy_trajectory_source(self.run_directory, record)
+            if self.trajectory_source is not None and copied != self.trajectory_source:
+                raise RuntimeError("a different mission trajectory is already recorded")
+            self.trajectory_source = copied
+            self.manifest["trajectory_source"] = copied
+            self._write_manifest()
+            self._write("trajectory_source", copied)
+        except (OSError, RuntimeError) as exc:
+            self._write("trajectory_provenance_error", str(exc))
 
     def _diagnostic_callback(self, message: DiagnosticArray) -> None:
         self._write(

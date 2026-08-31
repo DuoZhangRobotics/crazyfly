@@ -39,6 +39,30 @@ def _request(duration_s: float):
     return SimpleNamespace(height=0.04, duration=duration_message(duration_s))
 
 
+def test_pose_callback_uses_message_stamp_for_speed_and_receipt_for_age() -> None:
+    gateway = object.__new__(SafetyGateway)
+    calls = []
+    gateway.machine = SimpleNamespace(
+        record_pose=lambda *arguments: calls.append(arguments)
+    )
+    gateway._now = lambda: 10.0
+    message = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=123, nanosec=500_000_000)),
+        poses=[
+            SimpleNamespace(
+                name="cf1",
+                pose=SimpleNamespace(
+                    position=SimpleNamespace(x=1.0, y=2.0, z=3.0)
+                ),
+            )
+        ],
+    )
+
+    gateway._pose_callback(message)
+
+    assert calls == [("cf1", (1.0, 2.0, 3.0), 10.0, 123.5)]
+
+
 def test_land_is_rejected_after_gateway_disables() -> None:
     gateway = _gateway(SafetyState.DISABLED, False)
     response = SimpleNamespace()

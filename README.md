@@ -171,6 +171,73 @@ The installed `crazyfly_trajectory` and `crazyfly_trajectory_mission` commands
 are aliases for the same CLI. The legacy `--trajectory FILE` spelling remains
 accepted.
 
+pRRTC may instead provide an exact compiled polynomial payload. Validate it
+without ROS, radio access, or waypoint recompilation with:
+
+```sh
+python tools/trajectory_mission.py \
+  --compiled-payload /home/duo/pRRTC/dataset/ur5e_crazyflie_experiment/crazyfly_payloads/circle_5_seed_1.json \
+  --fleet /absolute/path/to/five_drone_crazyflies.yaml \
+  --safety config/local/safety.yaml
+```
+
+The payload's mission ID, trajectory ID, shared segment durations, and eight
+ascending-power coefficients are authoritative. The enabled fleet must exactly
+match the payload robot set. `--trajectory-id` is therefore accepted only for
+waypoint missions. Hardware execution still requires the separate `--execute`
+flag and every normal safety gate.
+
+### Unified pRRTC UR5e + Crazyflie demo
+
+Install the sibling `ur_tools` package and measured-clearance dependency into
+the same ROS-aware uv environment:
+
+```sh
+uv pip install --python /home/duo/ros2_ws/.venv/bin/python \
+  -r tools/ur-demo-requirements.txt
+```
+
+The combined bundle must contain exact Crazyflie polynomials, timed UR5e main
+and park paths, validation evidence, and a manifest with hashes, clean pRRTC
+state, hardware name mapping, source scene/result paths, and positive measured
+calibration/error/latency fields. Dry validation starts no ROS or RTDE process:
+
+```sh
+crazyfly_prrtc_demo /absolute/path/to/execution_bundle
+```
+
+Physical execution is separately gated by the robot IP and clean `crazyfly`,
+`ur_tools`, and pRRTC provenance:
+
+```sh
+crazyfly_prrtc_demo /absolute/path/to/execution_bundle \
+  --execute --confirm-robot-ip 172.16.90.197
+```
+
+The UR trajectory validator uses the lab-wide limits `pi rad/s` and
+`40 rad/s^2`; the RTDE executor uses `servoJ` at 100 Hz with lookahead 0.1 s
+and gain 1000. These values can still be overridden explicitly on the command
+line. The combined demo accepts missing offline return/abort corridors and
+measured arm/latency evidence by default, records that policy in the experiment
+manifest, and keeps all live flight and RTDE checks enabled.
+
+The coordinator owns the Crazyflie subprocess and RTDE connection. It
+prepositions both systems, schedules one monotonic start two seconds ahead,
+holds the arm goal through drone completion, executes the validated arm park
+path, and only then releases drone return. Normal return assigns sorted drones
+to 0.2, 0.4, 0.6, 0.8, and 1.0 m lanes, moves them horizontally over their
+captured anchors, and lands directly with descent durations capped at 0.2 m/s.
+The route
+is rejected if the effective geofence cannot contain the lanes or the captured
+anchors violate live separation. Coordinated abort stops the arm and lands
+drones vertically in place. Arm-only validation/playback is available as
+`crazyfly_ur_trajectory`; both commands are dry-run by default.
+
+Combined logs under `combined_experiments/` freeze the bundle and record
+repository/calibration hashes, scheduled and measured starts, UR joint/TCP
+samples, drone command/measurement samples, URDF-based measured clearance, and
+the pRRTC hardware audit result.
+
 Version-2 files use shared absolute times and UR-base goals for every enabled
 drone. The compiler creates degree-7 minimum-snap pieces with zero endpoint
 velocity, acceleration, and jerk and continuous derivatives through fly-through
@@ -178,8 +245,9 @@ waypoints. Yaw must remain zero while single-marker tracking is used.
 
 The gateway re-parses and continuously validates the compiled polynomials before
 uploading them. The configured limits are 0.25 m/s speed, 0.50 m/s² acceleration,
-2.0 m/s³ jerk, 60 seconds duration, the soft geofence, and a 0.25 m planned
-separation for the local four-drone profile. Position extrema and pairwise
+2.0 m/s³ jerk, 60 seconds duration, the soft geofence, and a 0.40 m planned
+separation in the generic profile. The reviewed local lab profile currently
+uses 0.15 m for both planned and live separation. Position extrema and pairwise
 separation are checked between waypoints as well as at them.
 
 For a future arm coordinator, prepare a mission with:
@@ -201,6 +269,13 @@ dry-run example is `config/trajectories/four_drone_box.yaml`: it first assembles
 a 35 cm-spaced line, executes a smooth 4 cm box as a formation, returns to the
 line, then returns to launch. Its first physical execution passed on 2026-08-30;
 repeatability testing remains required before involving the UR5e.
+
+Five-drone software-validation counterparts are provided as
+`config/trajectories/five_drone_box.yaml` and
+`config/trajectories/five_drone_figure8.yaml`. They include `cf5` in the same
+35 cm-spaced formation. Do not execute them physically until `cf5` has a
+measured local starting position, five identities have passed staged bring-up,
+and the reviewed safety profile expects exactly five raw markers.
 
 ## OptiTrack-only workflow
 
@@ -264,41 +339,51 @@ unlabeled markers in the volume. A persistent raw-marker count change, a
 missing named pose, or an implausible pose jump is treated as an identity fault
 before another marker can be reassigned to that drone.
 
-The one-drone helper requires exactly one visible marker:
+Pose-jump speed uses `tracking.pose_speed_window_s` seconds of source-stamped
+Motive history instead of two callback arrival times. Monotonic receipt time is
+still used independently for stale-pose timeouts. The local profile uses a
+50 ms window, which filters ROS scheduling jitter while retaining rapid marker
+swap detection.
+
+The one-drone helper accepts address suffixes `01` through `05` and requires
+exactly one visible marker:
 
 ```sh
 source tools/activate_ros.sh
-python tools/one_drone_hover.py 01 --execute
+python tools/one_drone_hover.py 05 --execute
 ```
 
-The four-drone helper defaults to staged validation with all four trackers
-active but only one aircraft flying at a time:
+The all-drone helper derives its robot set from the enabled entries in the fleet
+file, including `cf5`. For more than one enabled aircraft it defaults to staged
+validation with all selected trackers active but only one aircraft flying at a
+time. The safety profile's
+`tracking.expected_raw_marker_count` must equal the enabled fleet size:
 
 ```sh
 source tools/activate_ros.sh
-python tools/four_drone_hover.py --execute
+python tools/all_drone_hover.py --execute
 ```
 
 Only after the staged run and its logs pass, synchronized takeoff can be
 requested explicitly:
 
 ```sh
-python tools/four_drone_hover.py --execute --synchronized
+python tools/all_drone_hover.py --execute --synchronized
 ```
 
 The first synchronized translation test moves the full formation 8 cm along
 UR-base +X over two seconds, dwells for 0.5 seconds, returns, and lands:
 
 ```sh
-python tools/four_drone_hover.py --execute --synchronized --movement translate
+python tools/all_drone_hover.py --execute --synchronized --movement translate
 ```
 
 After that passes, the cyclic permutation moves each drone to the next drone's
-captured takeoff position over 2.5 seconds, dwells for 0.5 seconds, repeats
-four times, and lands:
+captured takeoff position over 2.5 seconds, dwells for 0.5 seconds, repeats once
+per enabled drone, and lands:
 
 ```sh
-python tools/four_drone_hover.py --execute --synchronized --movement cycle
+python tools/all_drone_hover.py --execute --synchronized --movement cycle
 ```
 
 Movement requests are submitted to the safety gateway as one atomic
@@ -306,6 +391,10 @@ base-frame batch. The gateway converts targets to Motive world, validates
 geofence and speed limits, computes exact continuous pairwise separation for
 all linear paths, checks every upstream service, and only then dispatches the
 full batch. Every step verifies that all drones settled within 8 cm.
+
+Successful execution now ends with an explicit `PASS: hover sequence completed`
+line. `Cleanup complete; Crazyradio is free` is also a normal successful cleanup
+message; it means the stopped ROS launch no longer owns the USB radio.
 
 Polynomial missions use `/crazyfly/trajectory_upload_requests` and
 `/crazyfly/trajectory_start_requests`. Upload is permitted only while disarmed;
@@ -342,4 +431,7 @@ and command events are preserved under `experiments/`. Positions are converted
 to the configured geofence frame, which is `base` in the local UR5e profile.
 Mission events preserve the trajectory path and SHA-256, readiness/start times,
 completion or identity-recheck status, mean/RMS/95th-percentile/maximum tracking
-error, measured separation, battery minima, and inferred motion-start skew.
+error, measured separation, battery minima, and inferred motion-start skew. The
+logger also copies the original waypoint or compiled-payload bytes into the run
+directory and records fleet, safety, accepted calibration, and trajectory
+SHA-256 hashes in the manifest.

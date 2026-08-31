@@ -1,0 +1,3 @@
+# Install ur_tools from the sibling checkout with its declared dependencies.
+-e /home/duo/ur_tools
+pybullet==3.2.7

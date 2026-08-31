@@ -1,0 +1,69 @@
+version: 2
+name: five_drone_line_figure8
+frame: base
+waypoints:
+  # All five drones receive the same x/y offset, preserving the 35 cm line.
+  # The compiled curve is approximately 30 cm wide and 16 cm tall.
+  - time_s: 0.0
+    goals:
+      cf1: {position: [0.1750, -0.800, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.5250, -0.800, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.1750, -0.800, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.5250, -0.800, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.8750, -0.800, 0.30], yaw_deg: 0.0}
+  - time_s: 2.0
+    goals:
+      cf1: {position: [0.2811, -0.720, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.4189, -0.720, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.0689, -0.720, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.6311, -0.720, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.9811, -0.720, 0.30], yaw_deg: 0.0}
+  - time_s: 4.0
+    goals:
+      cf1: {position: [0.3250, -0.800, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.3750, -0.800, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.0250, -0.800, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.6750, -0.800, 0.30], yaw_deg: 0.0}
+      cf5: {position: [1.0250, -0.800, 0.30], yaw_deg: 0.0}
+  - time_s: 6.0
+    goals:
+      cf1: {position: [0.2811, -0.880, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.4189, -0.880, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.0689, -0.880, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.6311, -0.880, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.9811, -0.880, 0.30], yaw_deg: 0.0}
+  - time_s: 8.0
+    goals:
+      cf1: {position: [0.1750, -0.800, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.5250, -0.800, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.1750, -0.800, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.5250, -0.800, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.8750, -0.800, 0.30], yaw_deg: 0.0}
+  - time_s: 10.0
+    goals:
+      cf1: {position: [0.0689, -0.720, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.6311, -0.720, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.2811, -0.720, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.4189, -0.720, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.7689, -0.720, 0.30], yaw_deg: 0.0}
+  - time_s: 12.0
+    goals:
+      cf1: {position: [0.0250, -0.800, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.6750, -0.800, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.3250, -0.800, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.3750, -0.800, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.7250, -0.800, 0.30], yaw_deg: 0.0}
+  - time_s: 14.0
+    goals:
+      cf1: {position: [0.0689, -0.880, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.6311, -0.880, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.2811, -0.880, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.4189, -0.880, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.7689, -0.880, 0.30], yaw_deg: 0.0}
+  - time_s: 16.0
+    goals:
+      cf1: {position: [0.1750, -0.800, 0.30], yaw_deg: 0.0}
+      cf2: {position: [-0.5250, -0.800, 0.30], yaw_deg: 0.0}
+      cf3: {position: [-0.1750, -0.800, 0.30], yaw_deg: 0.0}
+      cf4: {position: [0.5250, -0.800, 0.30], yaw_deg: 0.0}
+      cf5: {position: [0.8750, -0.800, 0.30], yaw_deg: 0.0}

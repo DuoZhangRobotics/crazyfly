@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -45,6 +46,9 @@ class RobotHealth:
     pose_speed_m_s: float | None = None
     pose_speed_fault_at: float | None = None
     pose_speed_fault_m_s: float | None = None
+    pose_history: deque[tuple[float, tuple[float, float, float]]] = field(
+        default_factory=deque
+    )
     battery_voltage: float | None = None
     supervisor_info: int = 0
 
@@ -75,19 +79,33 @@ class SafetyMachine:
         self.health = {name: RobotHealth() for name in self.robot_names}
 
     def record_pose(
-        self, name: str, position: Sequence[float], received_at: float
+        self,
+        name: str,
+        position: Sequence[float],
+        received_at: float,
+        sample_time: float | None = None,
     ) -> None:
         if name in self.health:
             values = tuple(float(value) for value in position)
             item = self.health[name]
-            if (
-                item.pose_received_at is not None
-                and item.position is not None
-                and received_at > item.pose_received_at
+            timestamp = received_at if sample_time is None else float(sample_time)
+            history = item.pose_history
+            if history and (
+                not isfinite(timestamp)
+                or timestamp <= history[-1][0]
+                or timestamp - history[-1][0] >= self.config.pose_reject_age_s
             ):
-                item.pose_speed_m_s = dist(item.position, values) / (
-                    received_at - item.pose_received_at
-                )
+                history.clear()
+            if not isfinite(timestamp):
+                timestamp = received_at
+            history.append((timestamp, values))  # type: ignore[arg-type]
+            cutoff = timestamp - self.config.pose_speed_window_s
+            while len(history) >= 2 and history[1][0] <= cutoff:
+                history.popleft()
+            baseline_time, baseline_position = history[0]
+            elapsed = timestamp - baseline_time
+            if elapsed >= self.config.pose_speed_window_s:
+                item.pose_speed_m_s = dist(baseline_position, values) / elapsed
                 maximum = self.config.maximum_pose_speed_m_s
                 if maximum is not None and item.pose_speed_m_s > maximum:
                     item.pose_speed_fault_at = received_at

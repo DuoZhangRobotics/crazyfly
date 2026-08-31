@@ -213,5 +213,5 @@ def ensure_crazyradio_free() -> Path:
             "Crazyradio cleanup did not complete; holders="
             f"{sorted(remaining_holders)}, processes={sorted(remaining_conflicts)}"
         )
-    print(f"Crazyradio released: {device}")
+    print(f"Cleanup complete; Crazyradio is free: {device}")
     return device

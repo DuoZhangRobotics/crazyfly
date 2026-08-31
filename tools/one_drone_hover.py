@@ -7,20 +7,20 @@ import argparse
 import tempfile
 from pathlib import Path
 
-import four_drone_hover
+import all_drone_hover
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 FLEET = ROOT / "config" / "local" / "crazyflies.yaml"
 SAFETY = ROOT / "config" / "local" / "safety.yaml"
-DRONE_INDICES = ("01", "02", "03", "04")
+DRONE_INDICES = ("01", "02", "03", "04", "05")
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run the managed 0.30 m hover for one drone selected by address "
-            "suffix 01, 02, 03, or 04."
+            "suffix 01, 02, 03, 04, or 05."
         )
     )
     parser.add_argument("drone_index", choices=DRONE_INDICES)
@@ -88,8 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         selected_safety.write_text(
             yaml.safe_dump(safety, sort_keys=False), encoding="utf-8"
         )
-        four_drone_hover.EXPECTED_ROBOTS = (robot_name,)
-        return four_drone_hover.main(
+        return all_drone_hover.main(
             [
                 "--fleet",
                 str(selected_fleet),

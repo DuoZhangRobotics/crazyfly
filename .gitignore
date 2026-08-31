@@ -211,6 +211,7 @@ log/
 install/
 config/local/
 experiments/
+combined_experiments/
 
 # Crazyswarm2 firmware table-of-contents caches (CRC in filename)
 /log*.csv

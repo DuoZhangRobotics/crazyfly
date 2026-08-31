@@ -13,7 +13,7 @@ Crazyradio PA, and live single-marker OptiTrack feedback. The safety gateway
 reached `READY`, while `operator_enabled` and `commands_allowed` remained false.
 No enable, takeoff, or motor command was sent, and nothing was flown.
 
-Subsequent one-aircraft hover tests passed for radio addresses 01-04. The first
+Subsequent one-aircraft hover tests passed for radio addresses 01-05. The first
 synchronized four-aircraft attempt failed when multiple single-marker tracks
 were lost and two aircraft diverged laterally. A motors-off identity test then
 confirmed the physical 01-04 mappings after swapping the positions of 03 and
@@ -29,6 +29,29 @@ takeoff requires an additional explicit flag.
 Experiment logs preserve all raw marker coordinates in UR `base` whenever the
 observed marker count differs from the reviewed expected count, allowing an
 extra reflection or missing reconstruction to be localized after a run.
+
+The pose-jump detector now measures displacement across a 50 ms Motive-stamped
+history window. Callback arrival time remains dedicated to tracking-age
+timeouts, preventing short ROS scheduling intervals from producing false
+instantaneous-speed emergencies.
+
+Unified pRRTC arm/drone coordination is implemented in this repository. The
+one-command coordinator validates hashed main/park/drone artifacts, schedules a
+shared monotonic start, executes the UR5e at 100 Hz, holds through drone
+completion, parks the arm before drone return, and couples arm stop to drone
+land-in-place abort. A complete simulated RTDE plus ROS/Crazyflie execution has
+passed through return, landing, audit-ready logging, and cleanup. Physical
+combined execution remains locked until clean repositories and a newly
+replanned, fully inflated execution bundle are available.
+
+The current combined-demo profile accepts planned UR joint speed up to pi rad/s
+and piecewise acceleration up to 40 rad/s^2, with `servoJ` gain 1000. After the
+arm returns to its park/home configuration, normal drone return uses sorted
+altitude lanes at 0.2 m intervals from 0.2 through 1.0 m, flies horizontally
+over captured anchors, and lands at no more than 0.2 m/s. The one-drone circle schema-v2
+bundle passes dry validation and the complete simulated run with a 9.6 ms start
+skew. Missing offline recovery/measurement evidence requires an explicit,
+logged combined-demo policy acknowledgement; live safety gates remain active.
 
 The synchronized hover and the all-four staged sequence have subsequently
 passed. Atomic coordinated movement is implemented with two modes: an 8 cm
@@ -77,6 +100,23 @@ all drones to the tabletop and landed without a safety event; mean tracking
 error was 1.4-2.3 cm, maximum error was 3.4-4.8 cm, and minimum separation was
 32.7 cm. Five transient extra-marker samples were recorded, all about 4.6-4.7 cm
 from cf2, indicating a local reflection or split reconstruction.
+
+pRRTC compiled-polynomial payload ingestion is now implemented without
+waypoint refitting. The mission runner preserves the embedded mission and
+trajectory IDs, reuses the gateway's exact continuous validation, and remains
+dry-run by default. Experiment manifests hash the fleet, safety profile,
+accepted calibration, and original payload, whose bytes are copied into the run
+directory. The exact one-drone pRRTC circle payload completed the hardware-free
+mock takeoff, preposition, synchronized trajectory, return, landing, and cleanup
+workflow. The unchanged five-drone payload is deliberately blocked by the
+reviewed negative-Y geofence and is not ready for physical execution.
+
+The selected-fleet hover path now derives every subscription, service client,
+staged step, synchronized batch, and movement cycle from the enabled fleet, so
+it can include `cf5`. Separate five-drone box and figure-eight examples compile
+with 35 cm planned spacing. Five-aircraft physical execution still requires a
+measured `cf5` starting position, an exact five-marker safety profile, and
+staged identity validation.
 
 ## 2. Installed environment
 
@@ -158,9 +198,11 @@ Public project interfaces:
 ### Experiment tooling
 
 - Trajectories are dry-run only unless `--execute` is supplied.
+- Exact pRRTC degree-7 JSON payloads are accepted through
+  `--compiled-payload` without waypoint recompilation.
 - The runner sends commands only to `/crazyfly/...` services.
-- The logger writes an event stream and a manifest with configuration paths and
-  SHA-256 hashes.
+- The logger writes an event stream, copies the original trajectory source, and
+  records fleet, safety, calibration, and trajectory SHA-256 hashes.
 - Accepted, rejected, safety-land, and emergency actions are published on the
   command event topic and included in JSONL/rosbag output.
 - Optional rosbag recording refuses to start below 1 GB free and has a maximum

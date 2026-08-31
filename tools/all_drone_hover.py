@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one guarded selected-fleet Crazyflie takeoff, hover, and landing."""
+"""Run a guarded all-selected-drone takeoff, hover, and landing."""
 
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ DEFAULT_SAFETY = ROOT / "config" / "local" / "safety.yaml"
 DEFAULT_MOTION_CAPTURE = ROOT / "config" / "local" / "motion_capture.yaml"
 DEFAULT_SERVER = ROOT / "config" / "server.yaml"
 DEFAULT_OUTPUT_ROOT = ROOT / "experiments"
-EXPECTED_ROBOTS = ("cf1", "cf2", "cf3", "cf4")
 TELEMETRY_RESTART_S = 12.0
 HARD_ENABLE_FAILURES = (
     "locked:",
@@ -46,6 +45,38 @@ HARD_ENABLE_FAILURES = (
     "battery below threshold",
     "raw marker count",
 )
+
+
+def cycle_goals(
+    original: dict[str, tuple[float, float, float]],
+    names: tuple[str, ...],
+    step: int,
+) -> dict[str, tuple[float, float, float]]:
+    if set(original) != set(names) or not names:
+        raise ValueError("cycle requires one original position per robot")
+    return {
+        name: original[names[(index + step) % len(names)]]
+        for index, name in enumerate(names)
+    }
+
+
+def coordinated_duration(
+    starts: dict[str, tuple[float, float, float]],
+    goals: dict[str, tuple[float, float, float]],
+    maximum_speed_m_s: float,
+    *,
+    minimum_duration_s: float = 2.5,
+    speed_fraction: float = 0.8,
+) -> float:
+    if set(starts) != set(goals) or not starts:
+        raise ValueError("coordinated duration requires matching robots")
+    planned_speed_m_s = maximum_speed_m_s * speed_fraction
+    if planned_speed_m_s <= 0:
+        raise ValueError("coordinated duration requires a positive speed")
+    maximum_distance_m = max(
+        math.dist(starts[name], goals[name]) for name in starts
+    )
+    return max(minimum_duration_s, maximum_distance_m / planned_speed_m_s)
 
 
 @contextmanager
@@ -158,6 +189,7 @@ def _estimator_variance_stable(
 def _run_sequence(
     launch_process: subprocess.Popen,
     *,
+    robot_names: tuple[str, ...],
     safety: SafetyConfig,
     synchronized: bool = False,
     movement: str = "hover",
@@ -182,7 +214,7 @@ def _run_sequence(
     position_received_at: dict[str, float] = {}
     estimator_variances: dict[
         str, list[tuple[float, float, float]]
-    ] = {name: [] for name in EXPECTED_ROBOTS}
+    ] = {name: [] for name in robot_names}
 
     def event_callback(message) -> None:
         nonlocal safety_action
@@ -211,7 +243,7 @@ def _run_sequence(
     def pose_callback(message: NamedPoseArray) -> None:
         received_at = time.monotonic()
         for named_pose in message.poses:
-            if named_pose.name in EXPECTED_ROBOTS:
+            if named_pose.name in robot_names:
                 position = named_pose.pose.position
                 positions_base[named_pose.name] = point_in_geofence_frame(
                     (position.x, position.y, position.z),
@@ -229,7 +261,7 @@ def _run_sequence(
     batch_publisher = node.create_publisher(
         String, "/crazyfly/batch_go_to_requests", 10
     )
-    for name in EXPECTED_ROBOTS:
+    for name in robot_names:
         def estimator_callback(
             message: LogDataGeneric, robot: str = name
         ) -> None:
@@ -245,11 +277,11 @@ def _run_sequence(
     enable = node.create_client(SetBool, "/crazyfly/enable")
     takeoff_clients = {
         name: node.create_client(Takeoff, f"/crazyfly/{name}/takeoff")
-        for name in EXPECTED_ROBOTS
+        for name in robot_names
     }
     land_clients = {
         name: node.create_client(Land, f"/crazyfly/{name}/land")
-        for name in EXPECTED_ROBOTS
+        for name in robot_names
     }
     emergency = node.create_client(Stop, "/crazyfly/emergency")
 
@@ -267,13 +299,13 @@ def _run_sequence(
         def wait_for_estimators() -> None:
             print(
                 "Waiting for ten stable Kalman variance samples for: "
-                + ", ".join(EXPECTED_ROBOTS),
+                + ", ".join(robot_names),
                 flush=True,
             )
             estimator_deadline = time.monotonic() + 20.0
             while not all(
                 _estimator_variance_stable(estimator_variances[name])
-                for name in EXPECTED_ROBOTS
+                for name in robot_names
             ):
                 if launch_process.poll() is not None:
                     raise RuntimeError(
@@ -282,7 +314,7 @@ def _run_sequence(
                 if time.monotonic() >= estimator_deadline:
                     missing = {
                         name: len(estimator_variances[name])
-                        for name in EXPECTED_ROBOTS
+                        for name in robot_names
                         if len(estimator_variances[name]) < 10
                     }
                     if missing:
@@ -292,7 +324,7 @@ def _run_sequence(
                         )
                     unstable = [
                         name
-                        for name in EXPECTED_ROBOTS
+                        for name in robot_names
                         if not _estimator_variance_stable(
                             estimator_variances[name]
                         )
@@ -306,7 +338,7 @@ def _run_sequence(
                 "Kalman estimator variance is stable: "
                 + ", ".join(
                     f"{name}={estimator_variances[name][-1]}"
-                    for name in EXPECTED_ROBOTS
+                    for name in robot_names
                 ),
                 flush=True,
             )
@@ -398,11 +430,11 @@ def _run_sequence(
 
         def current_base_positions() -> dict[str, tuple[float, float, float]]:
             now = time.monotonic()
-            if set(positions_base) != set(EXPECTED_ROBOTS):
+            if set(positions_base) != set(robot_names):
                 raise RuntimeError("not all base-frame poses are available")
             stale = [
                 name
-                for name in EXPECTED_ROBOTS
+                for name in robot_names
                 if now - position_received_at.get(name, 0.0)
                 >= safety.pose_reject_age_s
             ]
@@ -464,7 +496,7 @@ def _run_sequence(
                     for axis in range(3)
                 )
                 ** 0.5
-                for name in EXPECTED_ROBOTS
+                for name in robot_names
             }
             failed = {
                 name: error for name, error in errors.items() if error > 0.08
@@ -497,16 +529,28 @@ def _run_sequence(
                 send_batch("translate-out", outbound)
                 send_batch("translate-return", original)
             elif movement == "cycle":
-                names = tuple(EXPECTED_ROBOTS)
+                names = robot_names
                 for step in range(1, len(names) + 1):
-                    goals = {
-                        name: original[names[(index + step) % len(names)]]
-                        for index, name in enumerate(names)
-                    }
-                    send_batch(f"cycle-{step}", goals, duration_s=2.5)
+                    goals = cycle_goals(original, names, step)
+                    starts = current_base_positions()
+                    duration_s = coordinated_duration(
+                        starts,
+                        goals,
+                        safety.maximum_command_speed_m_s,
+                    )
+                    print(
+                        f"CYCLE {step}/{len(names)} duration "
+                        f"{duration_s:.2f} s",
+                        flush=True,
+                    )
+                    send_batch(
+                        f"cycle-{step}",
+                        goals,
+                        duration_s=duration_s,
+                    )
 
-        if synchronized or len(EXPECTED_ROBOTS) == 1:
-            takeoff(EXPECTED_ROBOTS)
+        if synchronized or len(robot_names) == 1:
+            takeoff(robot_names)
             if movement == "hover":
                 print(
                     "All selected takeoffs accepted; 3 s climb + 5 s hover",
@@ -524,7 +568,7 @@ def _run_sequence(
                         execute_movement()
                     except RuntimeError:
                         if not safety_action:
-                            land(EXPECTED_ROBOTS)
+                            land(robot_names)
                             _spin_for(node, 1.5, lambda: False)
                         raise
             if safety_action:
@@ -533,12 +577,13 @@ def _run_sequence(
                     flush=True,
                 )
                 _spin_for(node, 1.5, lambda: False)
+                raise RuntimeError("safety gateway ended the flight")
             else:
-                land(EXPECTED_ROBOTS)
+                land(robot_names)
                 print("All selected landings accepted", flush=True)
                 _spin_for(node, 1.5, lambda: False)
         else:
-            for index, name in enumerate(EXPECTED_ROBOTS):
+            for index, name in enumerate(robot_names):
                 print(f"STAGED {name}: takeoff, 3 s climb + 2 s hover", flush=True)
                 takeoff((name,))
                 _spin_for(node, 5.0, lambda: safety_action)
@@ -548,11 +593,13 @@ def _run_sequence(
                         flush=True,
                     )
                     _spin_for(node, 1.5, lambda: False)
-                    return
+                    raise RuntimeError(
+                        f"safety gateway ended the staged flight for {name}"
+                    )
                 land((name,))
                 print(f"STAGED {name}: landing accepted", flush=True)
                 _spin_for(node, 1.5, lambda: False)
-                if index + 1 < len(EXPECTED_ROBOTS):
+                if index + 1 < len(robot_names):
                     enable_when_ready()
     finally:
         with _ignore_cleanup_interrupts():
@@ -578,10 +625,21 @@ def main(argv: list[str] | None = None) -> int:
             args.motion_capture,
             require_motive=True,
         )
-        enabled = tuple(sorted(fleet.enabled))
-        if enabled != EXPECTED_ROBOTS:
+        enabled = tuple(
+            sorted(
+                fleet.enabled,
+                key=lambda name: int(name.removeprefix("cf")),
+            )
+        )
+        if not enabled:
             raise ConfigError(
-                f"exactly {EXPECTED_ROBOTS} must be enabled; found {enabled}"
+                "selected-fleet hover requires at least one enabled robot"
+            )
+        if safety.expected_raw_marker_count != len(enabled):
+            raise ConfigError(
+                "tracking.expected_raw_marker_count must match the enabled "
+                f"fleet size ({len(enabled)}); found "
+                f"{safety.expected_raw_marker_count}"
             )
         if safety.flight_enabled:
             raise ConfigError(
@@ -593,18 +651,20 @@ def main(argv: list[str] | None = None) -> int:
                 "movement modes require --synchronized"
             )
         print("PASS: selected-fleet configuration is valid")
-        for name in EXPECTED_ROBOTS:
+        for name in enabled:
             robot = fleet.enabled[name]
             print(f"  {name}: {robot.uri}, start={robot.initial_position}")
-        if args.synchronized or len(EXPECTED_ROBOTS) == 1:
+        if args.synchronized or len(enabled) == 1:
             print(
                 "Sequence: synchronized 0.30 m takeoff over 3 s, "
                 f"{args.movement} motion, 1 s landing"
             )
         else:
             print(
-                "Sequence: staged cf1-cf4; each performs a 0.30 m takeoff "
-                "over 3 s, 2 s hover, and 1 s landing"
+                "Sequence: staged "
+                + ", ".join(enabled)
+                + "; each performs a 0.30 m takeoff over 3 s, 2 s hover, "
+                "and 1 s landing"
             )
         print(f"Experiment telemetry: {Path(args.output_root).resolve()}")
         device, holders, conflicts = describe_status()
@@ -654,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     _run_sequence(
                         launch_process,
+                        robot_names=enabled,
                         safety=safety,
                         synchronized=args.synchronized,
                         movement=args.movement,
@@ -673,6 +734,13 @@ def main(argv: list[str] | None = None) -> int:
                         launch_process = None
                         continue
                     raise
+        _stop_launch(launch_process)
+        launch_process = None
+        print(
+            "PASS: hover sequence completed for " + ", ".join(enabled)
+            + "; Crazyradio is free",
+            flush=True,
+        )
         return 0
     except KeyboardInterrupt:
         print(

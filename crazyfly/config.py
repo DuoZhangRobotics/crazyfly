@@ -61,6 +61,7 @@ class SafetyConfig:
     expected_raw_marker_count: int | None
     marker_count_grace_s: float
     maximum_pose_speed_m_s: float | None
+    pose_speed_window_s: float
     pose_speed_action: str
     battery_warning_v: float
     battery_critical_v: float
@@ -305,6 +306,10 @@ def load_safety(path: str | Path) -> SafetyConfig:
             "tracking.marker_count_grace_s",
         ),
         maximum_pose_speed_m_s=maximum_pose_speed_m_s,
+        pose_speed_window_s=_finite_number(
+            tracking.get("pose_speed_window_s", 0.050),
+            "tracking.pose_speed_window_s",
+        ),
         pose_speed_action=pose_speed_action,
         battery_warning_v=_finite_number(
             battery.get("warning_v", 3.8), "battery.warning_v"
@@ -369,6 +374,11 @@ def load_safety(path: str | Path) -> SafetyConfig:
             "tracking.pose_identity_emergency_s must be between pose reject "
             "and emergency timeouts"
         )
+    if not 0 < config.pose_speed_window_s < config.pose_reject_age_s:
+        raise ConfigError(
+            "tracking.pose_speed_window_s must be positive and less than "
+            "the pose reject timeout"
+        )
     if not 0 < config.battery_critical_v <= config.battery_warning_v:
         raise ConfigError("battery thresholds must satisfy 0 < critical <= warning")
     if (
@@ -376,6 +386,7 @@ def load_safety(path: str | Path) -> SafetyConfig:
             config.status_stale_age_s,
             config.recovery_time_s,
             config.marker_count_grace_s,
+            config.pose_speed_window_s,
             config.maximum_takeoff_height_m,
             config.maximum_command_speed_m_s,
             config.maximum_trajectory_acceleration_m_s2,

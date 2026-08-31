@@ -62,6 +62,17 @@ def _ready_identity_machine(names=("cf1", "cf2")) -> SafetyMachine:
     return machine
 
 
+def _record_windowed_jump(
+    machine: SafetyMachine,
+    position: tuple[float, float, float],
+    now: float = 1.07,
+) -> None:
+    machine.record_pose("cf1", (0.0, 0.0, 0.3), 1.035)
+    machine.record_raw_marker_count(len(machine.robot_names), now)
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY, now)
+    machine.record_pose("cf1", position, now)
+
+
 def test_preflight_requires_a_stable_recovery_interval() -> None:
     machine = SafetyMachine(load_safety(ROOT / "config" / "mock_safety.yaml"), ("cf1",))
     _record_healthy(machine, 0.0)
@@ -119,11 +130,9 @@ def test_identity_timeout_emergency_stops_instead_of_position_controlled_land() 
 def test_implausible_pose_jump_is_an_immediate_identity_fault() -> None:
     machine = _ready_identity_machine(("cf1",))
     machine.mark_flying()
-    machine.record_raw_marker_count(1, 1.02)
-    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
-    machine.record_pose("cf1", (0.10, 0.0, 0.3), 1.02)
+    _record_windowed_jump(machine, (0.10, 0.0, 0.3))
 
-    result = machine.evaluate(1.02)
+    result = machine.evaluate(1.07)
 
     assert result.action is SafetyAction.EMERGENCY
     assert result.reasons[0].startswith("implausible pose speed: cf1")
@@ -133,11 +142,9 @@ def test_one_drone_pose_speed_wobble_requests_landing_without_lock() -> None:
     machine = _ready_identity_machine(("cf1",))
     machine.config = replace(machine.config, pose_speed_action="land")
     machine.mark_flying()
-    machine.record_raw_marker_count(1, 1.02)
-    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
-    machine.record_pose("cf1", (0.10, 0.0, 0.3), 1.02)
+    _record_windowed_jump(machine, (0.10, 0.0, 0.3))
 
-    result = machine.evaluate(1.02)
+    result = machine.evaluate(1.07)
 
     assert result.action is SafetyAction.LAND
     assert result.state is SafetyState.LANDING
@@ -148,15 +155,72 @@ def test_touchdown_pose_jump_does_not_emergency_stop_during_landing() -> None:
     machine = _ready_identity_machine(("cf1",))
     machine.mark_flying()
     machine.mark_landing()
-    machine.record_raw_marker_count(1, 1.02)
-    machine.record_status("cf1", 4.1, SUPERVISOR_READY, 1.02)
-    machine.record_pose("cf1", (0.10, 0.0, 0.04), 1.02)
+    _record_windowed_jump(machine, (0.10, 0.0, 0.04))
 
-    result = machine.evaluate(1.02)
+    result = machine.evaluate(1.07)
 
     assert result.action is SafetyAction.NONE
     assert result.state is SafetyState.LANDING
     assert result.reasons[0].startswith("implausible pose speed: cf1")
+
+
+def test_pose_speed_window_ignores_callback_arrival_jitter() -> None:
+    machine = _ready_identity_machine(("cf1",))
+    machine.config = replace(
+        machine.config,
+        maximum_pose_speed_m_s=1.5,
+        pose_speed_window_s=0.05,
+    )
+    machine.mark_flying()
+    received_at = 1.01
+    arrival_deltas = [0.0083, 0.0084, 0.0082, 0.0084, 0.00423, 0.01243, 0.0083, 0.0083]
+    for index, arrival_delta in enumerate(arrival_deltas, start=1):
+        received_at += arrival_delta
+        sample_time = 1.01 + index / 120.0
+        position = (0.4 * (sample_time - 1.01), 0.0, 0.3)
+        machine.record_pose(
+            "cf1",
+            position,
+            received_at,
+            sample_time,
+        )
+    machine.record_raw_marker_count(1, received_at)
+    machine.record_status("cf1", 4.1, SUPERVISOR_READY, received_at)
+
+    result = machine.evaluate(received_at)
+
+    assert result.action is SafetyAction.NONE
+    assert machine.health["cf1"].pose_speed_m_s == pytest.approx(0.4)
+    assert machine.health["cf1"].pose_speed_fault_at is None
+
+
+def test_pose_speed_window_detects_real_jump() -> None:
+    machine = _ready_identity_machine(("cf1",))
+    machine.config = replace(
+        machine.config,
+        maximum_pose_speed_m_s=1.5,
+        pose_speed_window_s=0.05,
+    )
+    machine.mark_flying()
+    _record_windowed_jump(machine, (0.10, 0.0, 0.3))
+
+    result = machine.evaluate(1.07)
+
+    assert result.action is SafetyAction.EMERGENCY
+    assert machine.health["cf1"].pose_speed_fault_m_s == pytest.approx(
+        0.10 / 0.06
+    )
+
+
+def test_pose_speed_history_resets_when_source_timestamp_moves_backward() -> None:
+    machine = _ready_identity_machine(("cf1",))
+
+    machine.record_pose("cf1", (0.5, 0.0, 0.3), 1.02, sample_time=0.5)
+
+    assert list(machine.health["cf1"].pose_history) == [
+        (0.5, (0.5, 0.0, 0.3))
+    ]
+    assert machine.health["cf1"].pose_speed_fault_at is None
 
 
 def test_preflight_accepts_an_already_armed_auto_arm_crazyflie() -> None:

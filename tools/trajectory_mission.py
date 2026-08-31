@@ -20,10 +20,10 @@ from pathlib import Path
 import yaml
 
 try:
-    from . import four_drone_hover as hover
+    from . import all_drone_hover as hover
     from .crazyradio_guard import describe_status, ensure_crazyradio_free
 except ImportError:  # Direct execution from the tools directory.
-    import four_drone_hover as hover
+    import all_drone_hover as hover
     from crazyradio_guard import describe_status, ensure_crazyradio_free
 
 from crazyfly.config import (
@@ -38,6 +38,7 @@ from crazyfly.trajectory import (
     TrajectoryPlan,
     evaluate_plan,
     load_trajectory,
+    trajectory_from_payload,
     trajectory_payload,
 )
 
@@ -50,6 +51,84 @@ DEFAULT_SERVER = ROOT / "config" / "server.yaml"
 DEFAULT_OUTPUT_ROOT = ROOT / "experiments"
 MOCK_FLEET = ROOT / "config" / "mock_crazyflies.yaml"
 MOCK_SAFETY = ROOT / "config" / "mock_safety.yaml"
+RETURN_BASE_ALTITUDE_M = 0.20
+RETURN_ALTITUDE_SPACING_M = 0.20
+RETURN_SPEED_M_S = 0.20
+
+
+def staged_return_goals(
+    current: dict[str, tuple[float, float, float]],
+    anchors: dict[str, tuple[float, float, float]],
+    safety: SafetyConfig,
+) -> tuple[tuple[str, dict[str, tuple[float, float, float]]], ...]:
+    """Build vertical-separation, horizontal-return, and descent stages."""
+    if set(current) != set(anchors) or not current:
+        raise ConfigError("staged return requires matching current poses and anchors")
+    names = tuple(sorted(current))
+    for first, second in combinations(names, 2):
+        if math.dist(anchors[first], anchors[second]) < safety.minimum_separation_m:
+            raise ConfigError(
+                f"captured anchors for {first} and {second} are closer than "
+                f"the {safety.minimum_separation_m:.2f} m live separation limit"
+            )
+
+    spacing = max(
+        RETURN_ALTITUDE_SPACING_M,
+        safety.minimum_separation_m + 0.05,
+    )
+    lower = RETURN_BASE_ALTITUDE_M
+    upper = float("inf")
+    if safety.has_geofence:
+        assert safety.geofence_min is not None
+        assert safety.geofence_max is not None
+        lower = max(
+            lower,
+            safety.geofence_min[2] + safety.soft_geofence_margin_m,
+        )
+        upper = safety.geofence_max[2] - safety.soft_geofence_margin_m
+    altitudes = {
+        name: lower + index * spacing for index, name in enumerate(names)
+    }
+    if max(altitudes.values()) > upper:
+        raise ConfigError("not enough geofence height for separated return lanes")
+
+    separate = {
+        name: (current[name][0], current[name][1], altitudes[name])
+        for name in names
+    }
+    over_anchors = {
+        name: (anchors[name][0], anchors[name][1], altitudes[name])
+        for name in names
+    }
+    stages = (
+        ("separate-altitudes", separate),
+        ("horizontal-to-anchors", over_anchors),
+    )
+    if safety.has_geofence:
+        assert safety.geofence_min is not None
+        assert safety.geofence_max is not None
+        for label, goals in stages:
+            for name, point in goals.items():
+                for axis, value in enumerate(point):
+                    minimum = (
+                        safety.geofence_min[axis]
+                        + safety.soft_geofence_margin_m
+                    )
+                    maximum = (
+                        safety.geofence_max[axis]
+                        - safety.soft_geofence_margin_m
+                    )
+                    if not minimum <= value <= maximum:
+                        raise ConfigError(
+                            f"{label} goal for {name} is outside the effective geofence"
+                        )
+    for label, goals in stages:
+        for first, second in combinations(names, 2):
+            if math.dist(goals[first], goals[second]) < safety.minimum_separation_m:
+                raise ConfigError(
+                    f"{label} violates live separation for {first} and {second}"
+                )
+    return stages
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -61,17 +140,112 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("trajectory", nargs="?")
     parser.add_argument("--trajectory", dest="trajectory_option")
+    parser.add_argument(
+        "--compiled-payload",
+        help=(
+            "exact compiled polynomial JSON from pRRTC; coefficients are "
+            "validated and uploaded without waypoint recompilation"
+        ),
+    )
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--wait-for-start", action="store_true")
     parser.add_argument("--start-timeout-s", type=float, default=30.0)
-    parser.add_argument("--trajectory-id", type=int, default=1)
+    parser.add_argument("--wait-for-return", action="store_true")
+    parser.add_argument("--return-timeout-s", type=float, default=10.0)
+    parser.add_argument(
+        "--trajectory-id",
+        type=int,
+        help="waypoint missions only; compiled payloads carry their own ID",
+    )
     parser.add_argument("--fleet")
     parser.add_argument("--safety")
     parser.add_argument("--motion-capture", default=str(DEFAULT_MOTION_CAPTURE))
     parser.add_argument("--server", default=str(DEFAULT_SERVER))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     return parser
+
+
+def validate_scheduled_start(
+    payload: object,
+    *,
+    mission_id: str,
+    mission_ready: bool,
+    already_scheduled: bool,
+    now_ns: int,
+) -> int:
+    if not isinstance(payload, dict):
+        raise ConfigError("mission schedule must contain a JSON object")
+    if payload.get("mission_id") != mission_id:
+        raise ConfigError("mission schedule ID does not match the prepared mission")
+    if not mission_ready:
+        raise ConfigError("mission is not ready")
+    if already_scheduled:
+        raise ConfigError("mission start is already scheduled")
+    start_ns = payload.get("start_monotonic_ns")
+    if isinstance(start_ns, bool) or not isinstance(start_ns, int):
+        raise ConfigError("start_monotonic_ns must be an integer")
+    lead_ns = start_ns - now_ns
+    if lead_ns < 1_000_000_000:
+        raise ConfigError("scheduled start must be at least one second in the future")
+    if lead_ns > 10_000_000_000:
+        raise ConfigError("scheduled start must be no more than ten seconds ahead")
+    return start_ns
+
+
+def _load_compiled_payload(
+    path: str | Path,
+    robot_names: tuple[str, ...],
+    safety: SafetyConfig,
+) -> tuple[dict[str, object], str, int, TrajectoryPlan]:
+    source = Path(path).expanduser().resolve()
+    try:
+        payload: object = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"compiled payload is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ConfigError("compiled payload must contain a JSON object")
+    mission_id, trajectory_id, plan = trajectory_from_payload(
+        payload, robot_names, safety
+    )
+    canonical = trajectory_payload(
+        plan, mission_id=mission_id, trajectory_id=trajectory_id
+    )
+    if payload != canonical:
+        raise ConfigError(
+            "compiled payload changes during normalization; refusing to alter coefficients"
+        )
+    return payload, mission_id, trajectory_id, plan
+
+
+def _trajectory_record(
+    source: Path,
+    *,
+    kind: str,
+    mission_id: str | None,
+    trajectory_id: int,
+    plan: TrajectoryPlan,
+) -> dict[str, object]:
+    assert plan.metrics is not None
+    return {
+        "kind": kind,
+        "path": str(source),
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "mission_id": mission_id,
+        "trajectory_id": trajectory_id,
+        "duration_s": plan.duration_s,
+        "robots": sorted(plan.trajectories),
+        "start_positions_base_m": plan.start_positions,
+        "end_positions_base_m": plan.end_positions,
+        "metrics": {
+            "maximum_speed_m_s": plan.metrics.maximum_speed_m_s,
+            "maximum_acceleration_m_s2": (
+                plan.metrics.maximum_acceleration_m_s2
+            ),
+            "maximum_jerk_m_s3": plan.metrics.maximum_jerk_m_s3,
+            "minimum_separation_m": plan.metrics.minimum_separation_m,
+        },
+    }
 
 
 def _publish_event(publisher, command: str, status: str, details: object) -> None:
@@ -173,8 +347,10 @@ def _run_mission(
     trajectory_id: int,
     wait_for_start: bool,
     start_timeout_s: float,
+    wait_for_return: bool,
+    return_timeout_s: float,
     skip_estimator_gate: bool,
-    trajectory_record: dict[str, str],
+    trajectory_record: dict[str, object],
 ) -> dict[str, object]:
     import rclpy
     from builtin_interfaces.msg import Duration
@@ -203,7 +379,11 @@ def _run_mission(
     accepted_landings: set[str] = set()
     safety_action = False
     mission_ready = False
+    endpoint_ready = False
     external_start_requested = False
+    scheduled_start_ns: int | None = None
+    return_requested = False
+    abort_requested = False
     positions_base: dict[str, tuple[float, float, float]] = {}
     position_received_at: dict[str, float] = {}
     pose_samples: list[tuple[float, dict[str, tuple[float, float, float]]]] = []
@@ -254,7 +434,7 @@ def _run_mission(
             pose_samples.append((received_at, dict(positions_base)))
 
     def start_service_callback(_request, response):
-        nonlocal external_start_requested
+        nonlocal external_start_requested, scheduled_start_ns
         if not mission_ready:
             response.success = False
             response.message = "mission is not ready"
@@ -263,8 +443,63 @@ def _run_mission(
             response.message = "start was already requested"
         else:
             external_start_requested = True
+            scheduled_start_ns = time.monotonic_ns()
             response.success = True
             response.message = f"start accepted for {mission_id}"
+        return response
+
+    def schedule_callback(message: String) -> None:
+        nonlocal external_start_requested, scheduled_start_ns
+        try:
+            payload = json.loads(message.data)
+            scheduled_start_ns = validate_scheduled_start(
+                payload,
+                mission_id=mission_id,
+                mission_ready=mission_ready,
+                already_scheduled=scheduled_start_ns is not None,
+                now_ns=time.monotonic_ns(),
+            )
+            external_start_requested = True
+            _publish_event(
+                command_publisher,
+                "mission_schedule",
+                "accepted",
+                {
+                    "mission_id": mission_id,
+                    "start_monotonic_ns": scheduled_start_ns,
+                },
+            )
+        except (ConfigError, json.JSONDecodeError) as exc:
+            _publish_event(
+                command_publisher,
+                "mission_schedule",
+                "rejected",
+                {"mission_id": mission_id, "reason": str(exc)},
+            )
+
+    def return_service_callback(_request, response):
+        nonlocal return_requested
+        if not endpoint_ready:
+            response.success = False
+            response.message = "mission endpoint is not ready"
+        elif return_requested:
+            response.success = False
+            response.message = "return was already requested"
+        else:
+            return_requested = True
+            response.success = True
+            response.message = f"return accepted for {mission_id}"
+        return response
+
+    def abort_service_callback(_request, response):
+        nonlocal abort_requested
+        if abort_requested:
+            response.success = False
+            response.message = "abort was already requested"
+        else:
+            abort_requested = True
+            response.success = True
+            response.message = f"land-in-place accepted for {mission_id}"
         return response
 
     node.create_subscription(String, "/crazyfly/commands", event_callback, 10)
@@ -274,6 +509,19 @@ def _run_mission(
     if wait_for_start:
         node.create_service(
             Trigger, "/crazyfly/mission/start", start_service_callback
+        )
+        node.create_subscription(
+            String,
+            "/crazyfly/mission/schedule_requests",
+            schedule_callback,
+            10,
+        )
+    if wait_for_return:
+        node.create_service(
+            Trigger, "/crazyfly/mission/return", return_service_callback
+        )
+        node.create_service(
+            Trigger, "/crazyfly/mission/abort", abort_service_callback
         )
     for name in robot_names:
         def estimator_callback(
@@ -306,7 +554,7 @@ def _run_mission(
     }
 
     def spin_for(seconds: float) -> None:
-        hover._spin_for(node, seconds, lambda: safety_action)
+        hover._spin_for(node, seconds, lambda: safety_action or abort_requested)
 
     def current_positions() -> dict[str, tuple[float, float, float]]:
         now = time.monotonic()
@@ -408,19 +656,35 @@ def _run_mission(
         if set(robot_names) - accepted_takeoffs:
             raise RuntimeError("takeoff was not accepted for every drone")
 
-    def land() -> None:
+    def land(*, from_return_lanes: bool = False) -> float:
         accepted_landings.clear()
+        landing_positions = fresh_positions() if from_return_lanes else {}
+        maximum_duration_s = 1.0
         for name in robot_names:
+            duration_s = (
+                max(
+                    1.0,
+                    (landing_positions[name][2] - 0.04) / RETURN_SPEED_M_S,
+                )
+                if from_return_lanes
+                else 1.0
+            )
+            maximum_duration_s = max(maximum_duration_s, duration_s)
             request = Land.Request()
             request.group_mask = 0
             request.height = 0.04
-            request.duration = Duration(sec=1)
+            whole_seconds = int(duration_s)
+            request.duration = Duration(
+                sec=whole_seconds,
+                nanosec=int((duration_s - whole_seconds) * 1_000_000_000),
+            )
             land_clients[name].call_async(request)
         deadline = time.monotonic() + 3.0
         while set(robot_names) - accepted_landings and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.05)
         if set(robot_names) - accepted_landings:
             raise RuntimeError("landing was not accepted for every drone")
+        return maximum_duration_s
 
     def wait_settled(
         goals: dict[str, tuple[float, float, float]],
@@ -432,7 +696,7 @@ def _run_mission(
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.02)
-            if safety_action:
+            if safety_action or abort_requested:
                 raise RuntimeError("safety gateway stopped the mission")
             actual = current_positions()
             if all(math.dist(actual[name], goals[name]) <= tolerance_m for name in robot_names):
@@ -481,17 +745,21 @@ def _run_mission(
                 raise RuntimeError("safety gateway stopped return-to-launch")
             try:
                 actual = fresh_positions()
-                distance_m = max(
-                    math.dist(actual[name], launch_positions[name])
-                    for name in robot_names
-                )
-                duration_s = max(2.0, distance_m / 0.20)
-                send_batch(
-                    f"{label}-attempt-{attempt}",
-                    launch_positions,
-                    duration_s,
-                    0.08,
-                )
+                stages = staged_return_goals(actual, launch_positions, safety)
+                stage_start = actual
+                for stage_label, goals in stages:
+                    distance_m = max(
+                        math.dist(stage_start[name], goals[name])
+                        for name in robot_names
+                    )
+                    duration_s = max(2.0, distance_m / RETURN_SPEED_M_S)
+                    send_batch(
+                        f"{label}-{stage_label}-attempt-{attempt}",
+                        goals,
+                        duration_s,
+                        0.08,
+                    )
+                    stage_start = goals
                 return
             except RuntimeError as exc:
                 errors.append(str(exc))
@@ -572,6 +840,11 @@ def _run_mission(
                     raise RuntimeError("safety gateway stopped while waiting")
             if not external_start_requested:
                 raise RuntimeError("external mission start timed out")
+            assert scheduled_start_ns is not None
+            while time.monotonic_ns() < scheduled_start_ns:
+                rclpy.spin_once(node, timeout_sec=0.01)
+                if safety_action or abort_requested:
+                    raise RuntimeError("mission stopped before scheduled start")
 
         publish_request(
             start_publisher,
@@ -585,7 +858,7 @@ def _run_mission(
         if trajectory_started_at is None:
             trajectory_started_at = time.monotonic()
         spin_for(plan.duration_s + 0.5)
-        if safety_action:
+        if safety_action or abort_requested:
             raise RuntimeError("safety gateway stopped trajectory execution")
         wait_settled(plan.end_positions, 0.08, 0.3, 2.0)
         _publish_event(
@@ -595,9 +868,41 @@ def _run_mission(
             {"mission_id": mission_id, "duration_s": plan.duration_s},
         )
 
+        endpoint_ready = True
+        if wait_for_return:
+            _publish_event(
+                command_publisher,
+                "mission_endpoint_ready",
+                "accepted",
+                {
+                    "mission_id": mission_id,
+                    "return_service": "/crazyfly/mission/return",
+                    "abort_service": "/crazyfly/mission/abort",
+                },
+            )
+            deadline = time.monotonic() + return_timeout_s
+            while (
+                not return_requested
+                and not abort_requested
+                and time.monotonic() < deadline
+            ):
+                rclpy.spin_once(node, timeout_sec=0.05)
+                if safety_action:
+                    raise RuntimeError("safety gateway stopped endpoint hold")
+            if abort_requested or not return_requested:
+                landing_duration_s = land()
+                spin_for(landing_duration_s + 0.5)
+                flight_active = False
+                reason = (
+                    "coordinator requested land-in-place"
+                    if abort_requested
+                    else "arm park acknowledgement timed out"
+                )
+                raise RuntimeError(reason)
+
         return_to_launch("return")
-        land()
-        spin_for(1.5)
+        landing_duration_s = land(from_return_lanes=True)
+        spin_for(landing_duration_s + 0.5)
         flight_active = False
         report = mission_report(
             plan, trajectory_started_at, pose_samples, battery_minima
@@ -622,10 +927,13 @@ def _run_mission(
         )
         if flight_active and not safety_action:
             with suppress(Exception):
-                return_to_launch("abort-return")
-            with suppress(Exception):
-                land()
-                spin_for(1.5)
+                if wait_for_return:
+                    landing_duration_s = land()
+                    spin_for(landing_duration_s + 0.5)
+                else:
+                    return_to_launch("abort-return")
+                    landing_duration_s = land(from_return_lanes=True)
+                    spin_for(landing_duration_s + 0.5)
         raise
     finally:
         with hover._ignore_cleanup_interrupts():
@@ -656,12 +964,29 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     launch_process = None
     try:
-        trajectory_path = args.trajectory_option or args.trajectory
-        if not trajectory_path:
-            raise ConfigError("a trajectory file is required")
+        sources = [
+            value
+            for value in (
+                args.trajectory,
+                args.trajectory_option,
+                args.compiled_payload,
+            )
+            if value is not None
+        ]
+        if not sources:
+            raise ConfigError("a trajectory or compiled payload file is required")
+        if len(sources) != 1:
+            raise ConfigError(
+                "provide exactly one positional trajectory, --trajectory, or "
+                "--compiled-payload"
+            )
+        if args.compiled_payload is not None and args.trajectory_id is not None:
+            raise ConfigError("--trajectory-id cannot be used with --compiled-payload")
         if not math.isfinite(args.start_timeout_s) or args.start_timeout_s <= 0:
             raise ConfigError("--start-timeout-s must be positive and finite")
-        if not 0 <= args.trajectory_id <= 255:
+        if not math.isfinite(args.return_timeout_s) or args.return_timeout_s <= 0:
+            raise ConfigError("--return-timeout-s must be positive and finite")
+        if args.trajectory_id is not None and not 0 <= args.trajectory_id <= 255:
             raise ConfigError("--trajectory-id must be from 0 to 255")
         fleet_path = Path(
             args.fleet or (MOCK_FLEET if args.mock else DEFAULT_FLEET)
@@ -679,19 +1004,36 @@ def main(argv: list[str] | None = None) -> int:
                 args.motion_capture,
                 require_motive=args.execute,
             )
-        plan = load_trajectory(trajectory_path, fleet, safety)
-        trajectory_source = Path(trajectory_path).expanduser().resolve()
-        trajectory_record = {
-            "path": str(trajectory_source),
-            "sha256": hashlib.sha256(trajectory_source.read_bytes()).hexdigest(),
-        }
+        embedded_mission_id: str | None = None
+        if args.compiled_payload is not None:
+            trajectory_source = Path(args.compiled_payload).expanduser().resolve()
+            _, embedded_mission_id, trajectory_id, plan = _load_compiled_payload(
+                trajectory_source,
+                tuple(fleet.enabled),
+                safety,
+            )
+            source_kind = "compiled_payload"
+        else:
+            trajectory_source = Path(sources[0]).expanduser().resolve()
+            plan = load_trajectory(trajectory_source, fleet, safety)
+            trajectory_id = 1 if args.trajectory_id is None else args.trajectory_id
+            source_kind = "waypoints"
+        trajectory_record = _trajectory_record(
+            trajectory_source,
+            kind=source_kind,
+            mission_id=embedded_mission_id,
+            trajectory_id=trajectory_id,
+            plan=plan,
+        )
         _print_plan(plan)
         if not args.execute:
             print("DRY RUN: no ROS process, radio connection, or command was started")
             return 0
         if shutil.which("ros2") is None:
             raise RuntimeError("ros2 is unavailable; source tools/activate_ros.sh")
-        mission_id = f"{plan.name[:40]}-{time.time_ns() % 1_000_000_000:09d}"
+        mission_id = embedded_mission_id or (
+            f"{plan.name[:40]}-{time.time_ns() % 1_000_000_000:09d}"
+        )
         if args.mock:
             command = [
                 "ros2",
@@ -708,9 +1050,11 @@ def main(argv: list[str] | None = None) -> int:
                 safety=safety,
                 plan=plan,
                 mission_id=mission_id,
-                trajectory_id=args.trajectory_id,
+                trajectory_id=trajectory_id,
                 wait_for_start=args.wait_for_start,
                 start_timeout_s=args.start_timeout_s,
+                wait_for_return=args.wait_for_return,
+                return_timeout_s=args.return_timeout_s,
                 skip_estimator_gate=True,
                 trajectory_record=trajectory_record,
             )
@@ -748,9 +1092,11 @@ def main(argv: list[str] | None = None) -> int:
                     safety=safety,
                     plan=plan,
                     mission_id=mission_id,
-                    trajectory_id=args.trajectory_id,
+                    trajectory_id=trajectory_id,
                     wait_for_start=args.wait_for_start,
                     start_timeout_s=args.start_timeout_s,
+                    wait_for_return=args.wait_for_return,
+                    return_timeout_s=args.return_timeout_s,
                     skip_estimator_gate=False,
                     trajectory_record=trajectory_record,
                 )

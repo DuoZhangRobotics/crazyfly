@@ -31,6 +31,15 @@ from .trajectory import evaluate_coefficients
 
 
 @dataclass
+class MockMotion:
+    start: tuple[float, float, float]
+    target: tuple[float, float, float]
+    started_at: float
+    duration_s: float
+    flying_after: bool | None = None
+
+
+@dataclass
 class MockRobot:
     position: list[float]
     battery_voltage: float = 4.1
@@ -40,6 +49,7 @@ class MockRobot:
     trajectories: dict[int, list[object]] = field(default_factory=dict)
     active_trajectory_id: int | None = None
     trajectory_started_at: float | None = None
+    active_motion: MockMotion | None = None
 
 
 class MockStack(Node):
@@ -100,6 +110,7 @@ class MockStack(Node):
     def _publish_poses(self) -> None:
         if self.drop_tracking:
             return
+        self._update_motions()
         self._update_trajectories()
         message = NamedPoseArray()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -144,6 +155,7 @@ class MockStack(Node):
         self.robots[name].armed = request.arm
         if not request.arm:
             self.robots[name].flying = False
+            self.robots[name].active_motion = None
             self.robots[name].active_trajectory_id = None
             self.robots[name].trajectory_started_at = None
         return response
@@ -153,16 +165,27 @@ class MockStack(Node):
     ) -> Takeoff.Response:
         robot = self.robots[name]
         if robot.armed:
-            robot.position[2] = float(request.height)
             robot.flying = True
+            target = (robot.position[0], robot.position[1], float(request.height))
+            self._start_motion(
+                robot,
+                target,
+                self._duration_seconds(request.duration),
+                flying_after=True,
+            )
         return response
 
     def _land_callback(
         self, name: str, request: Land.Request, response: Land.Response
     ) -> Land.Response:
         robot = self.robots[name]
-        robot.position[2] = float(request.height)
-        robot.flying = False
+        target = (robot.position[0], robot.position[1], float(request.height))
+        self._start_motion(
+            robot,
+            target,
+            self._duration_seconds(request.duration),
+            flying_after=False,
+        )
         robot.active_trajectory_id = None
         robot.trajectory_started_at = None
         return response
@@ -174,7 +197,11 @@ class MockStack(Node):
         target = [request.goal.x, request.goal.y, request.goal.z]
         if request.relative:
             target = [current + delta for current, delta in zip(robot.position, target)]
-        robot.position[:] = target
+        self._start_motion(
+            robot,
+            tuple(float(value) for value in target),
+            self._duration_seconds(request.duration),
+        )
         return response
 
     def _upload_trajectory_callback(
@@ -195,6 +222,7 @@ class MockStack(Node):
         for robot in self.robots.values():
             trajectory_id = int(request.trajectory_id)
             if trajectory_id in robot.trajectories:
+                robot.active_motion = None
                 robot.active_trajectory_id = trajectory_id
                 robot.trajectory_started_at = started_at
         return response
@@ -202,6 +230,38 @@ class MockStack(Node):
     @staticmethod
     def _duration_seconds(message) -> float:
         return float(message.sec) + float(message.nanosec) / 1_000_000_000.0
+
+    @staticmethod
+    def _start_motion(
+        robot: MockRobot,
+        target: tuple[float, float, float],
+        duration_s: float,
+        *,
+        flying_after: bool | None = None,
+    ) -> None:
+        robot.active_motion = MockMotion(
+            start=tuple(robot.position),
+            target=target,
+            started_at=time.monotonic(),
+            duration_s=max(0.001, duration_s),
+            flying_after=flying_after,
+        )
+
+    def _update_motions(self) -> None:
+        now = time.monotonic()
+        for robot in self.robots.values():
+            motion = robot.active_motion
+            if motion is None:
+                continue
+            fraction = min(1.0, max(0.0, now - motion.started_at) / motion.duration_s)
+            robot.position[:] = [
+                start + fraction * (target - start)
+                for start, target in zip(motion.start, motion.target)
+            ]
+            if fraction >= 1.0:
+                if motion.flying_after is not None:
+                    robot.flying = motion.flying_after
+                robot.active_motion = None
 
     def _update_trajectories(self) -> None:
         now = time.monotonic()
@@ -244,6 +304,7 @@ class MockStack(Node):
         for robot in self.robots.values():
             robot.armed = False
             robot.flying = False
+            robot.active_motion = None
             robot.active_trajectory_id = None
             robot.trajectory_started_at = None
         return response

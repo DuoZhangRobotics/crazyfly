@@ -200,10 +200,17 @@ class SafetyGateway(Node):
 
     def _pose_callback(self, message: NamedPoseArray) -> None:
         received_at = self._now()
+        stamp = message.header.stamp
+        sample_time = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        if sample_time <= 0:
+            sample_time = received_at
         for named_pose in message.poses:
             position = named_pose.pose.position
             self.machine.record_pose(
-                named_pose.name, (position.x, position.y, position.z), received_at
+                named_pose.name,
+                (position.x, position.y, position.z),
+                received_at,
+                sample_time,
             )
 
     def _point_cloud_callback(self, message: PointCloud2) -> None:

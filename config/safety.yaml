@@ -13,6 +13,7 @@ crazyfly_safety:
     marker_count_grace_s: 0.050
     pose_identity_emergency_s:
     maximum_pose_speed_m_s:
+    pose_speed_window_s: 0.050
     pose_speed_action: emergency
   battery:
     warning_v: 3.8

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import replace
 from math import dist
 from pathlib import Path
@@ -198,6 +199,36 @@ def test_payload_rejects_corrupt_polynomial_coefficients() -> None:
         trajectory_from_payload(payload, tuple(fleet.enabled), safety)
 
 
+def test_payload_rejects_nonzero_yaw() -> None:
+    fleet, safety = _inputs()
+    plan = load_trajectory(EXAMPLE, fleet, safety)
+    payload = trajectory_payload(plan, mission_id="mission-1", trajectory_id=7)
+    payload["trajectories"]["cf1"]["pieces"][0]["poly_yaw"][0] = 0.1
+
+    with pytest.raises(ConfigError, match="require zero yaw"):
+        trajectory_from_payload(payload, tuple(fleet.enabled), safety)
+
+
+def test_payload_requires_exact_enabled_robot_set() -> None:
+    fleet, safety = _inputs()
+    plan = load_trajectory(EXAMPLE, fleet, safety)
+    payload = trajectory_payload(plan, mission_id="mission-1", trajectory_id=7)
+
+    with pytest.raises(ConfigError, match="exactly the enabled robots"):
+        trajectory_from_payload(payload, ("cf1", "cf2"), safety)
+
+
+def test_payload_rejects_inconsistent_piece_durations() -> None:
+    fleet, safety = _inputs()
+    plan = load_trajectory(EXAMPLE, fleet, safety)
+    payload = trajectory_payload(plan, mission_id="mission-1", trajectory_id=7)
+    payload["trajectories"]["cf2"] = deepcopy(payload["trajectories"]["cf1"])
+    payload["trajectories"]["cf2"]["pieces"][0]["duration_s"] += 0.1
+
+    with pytest.raises(ConfigError, match="share piece durations"):
+        trajectory_from_payload(payload, ("cf1", "cf2"), safety)
+
+
 def test_base_to_world_polynomial_transform_uses_inverse_direction() -> None:
     _, safety = _inputs()
     base_from_world = (
@@ -237,11 +268,39 @@ def test_derivative_helpers_use_ascending_polynomial_coefficients() -> None:
     assert evaluate_coefficients(derivative, 2.0) == pytest.approx(14.0)
 
 
-def test_four_drone_example_prepositions_to_line_with_planning_clearance() -> None:
-    fleet = load_fleet(ROOT / "config" / "local" / "crazyflies.yaml")
-    safety = load_safety(ROOT / "config" / "local" / "safety.yaml")
+def _formation_fleet(tmp_path: Path, trajectory_path: Path, names: tuple[str, ...]):
+    source = yaml.safe_load((ROOT / "config" / "mock_crazyflies.yaml").read_text())
+    goals = yaml.safe_load(trajectory_path.read_text())["waypoints"][0]["goals"]
+    template = source["robots"]["cf1"]
+    source["robots"] = {}
+    for index, name in enumerate(names, start=1):
+        robot = dict(template)
+        robot["uri"] = f"radio://0/80/2M/E7E7E7E7{index:02d}"
+        robot["initial_position"] = goals[name]["position"]
+        source["robots"][name] = robot
+    path = tmp_path / "fleet.yaml"
+    path.write_text(yaml.safe_dump(source, sort_keys=False))
+    return load_fleet(path)
+
+
+def _trajectory_safety():
+    return replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        minimum_separation_m=0.15,
+        trajectory_minimum_separation_m=0.15,
+    )
+
+
+def test_four_drone_example_prepositions_to_line_with_planning_clearance(
+    tmp_path: Path,
+) -> None:
+    trajectory_path = ROOT / "config" / "trajectories" / "four_drone_box.yaml"
+    fleet = _formation_fleet(
+        tmp_path, trajectory_path, ("cf1", "cf2", "cf3", "cf4")
+    )
+    safety = _trajectory_safety()
     plan = load_trajectory(
-        ROOT / "config" / "trajectories" / "four_drone_box.yaml",
+        trajectory_path,
         fleet,
         safety,
     )
@@ -258,6 +317,41 @@ def test_four_drone_example_prepositions_to_line_with_planning_clearance() -> No
         launch_hover, plan.start_positions
     )
 
+    assert minimum >= safety.trajectory_minimum_separation_m
+    assert plan.metrics is not None
+    assert plan.metrics.minimum_separation_m == pytest.approx(0.35, abs=1e-6)
+
+
+@pytest.mark.parametrize("filename", ["five_drone_box.yaml", "five_drone_figure8.yaml"])
+def test_five_drone_examples_include_cf5_with_planning_clearance(
+    tmp_path: Path, filename: str
+) -> None:
+    trajectory_path = ROOT / "config" / "trajectories" / filename
+    fleet = _formation_fleet(
+        tmp_path,
+        trajectory_path,
+        ("cf1", "cf2", "cf3", "cf4", "cf5"),
+    )
+    safety = _trajectory_safety()
+
+    plan = load_trajectory(
+        trajectory_path,
+        fleet,
+        safety,
+    )
+    launch_hover = {
+        name: (
+            point_in_geofence_frame(robot.initial_position, safety)[0],
+            point_in_geofence_frame(robot.initial_position, safety)[1],
+            0.30,
+        )
+        for name, robot in fleet.enabled.items()
+    }
+    minimum, _pair, _time_fraction = continuous_minimum_separation(
+        launch_hover, plan.start_positions
+    )
+
+    assert set(plan.trajectories) == {"cf1", "cf2", "cf3", "cf4", "cf5"}
     assert minimum >= safety.trajectory_minimum_separation_m
     assert plan.metrics is not None
     assert plan.metrics.minimum_separation_m == pytest.approx(0.35, abs=1e-6)
