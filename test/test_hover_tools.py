@@ -19,6 +19,7 @@ import payload_mission  # noqa: E402
 import trajectory_mission  # noqa: E402
 
 from crazyfly.config import ConfigError, load_fleet, load_safety  # noqa: E402
+from crazyfly.safety import continuous_minimum_separation  # noqa: E402
 from crazyfly.trajectory import (  # noqa: E402
     evaluate_plan,
     load_trajectory,
@@ -678,3 +679,62 @@ def test_stop_launch_checks_radio_even_if_launch_parent_already_exited(
     )
     all_drone_hover._stop_launch(FakeProcess())
     assert calls == ["checked"]
+
+
+def test_staged_preposition_uses_separate_altitude_lanes() -> None:
+    safety = replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        minimum_separation_m=0.15,
+        soft_geofence_margin_m=0.01,
+        geofence_max=(2.0, 2.0, 1.5),
+    )
+    current = {
+        "cf1": (0.320, -0.443, 0.30),
+        "cf2": (-0.223, -0.483, 0.30),
+        "cf3": (-0.222, -1.170, 0.30),
+    }
+    starts = {
+        "cf1": (-0.060, -0.680, 0.201),
+        "cf2": (0.309, -0.561, 0.119),
+        "cf3": (-0.299, -0.916, 0.702),
+    }
+
+    direct_minimum, _pair, _fraction = continuous_minimum_separation(
+        current, starts
+    )
+    stages = trajectory_mission.staged_preposition_goals(
+        current, starts, safety
+    )
+
+    assert direct_minimum < safety.minimum_separation_m
+    assert [label for label, _goals in stages] == [
+        "separate-altitudes",
+        "horizontal-to-starts",
+        "align-start-altitudes",
+    ]
+    assert stages[-1][1] == starts
+    stage_start = current
+    for _label, goals in stages:
+        minimum, _pair, _fraction = continuous_minimum_separation(
+            stage_start, goals
+        )
+        assert minimum >= safety.minimum_separation_m
+        stage_start = goals
+
+
+def test_batch_id_is_bounded_and_distinguishes_long_stage_names() -> None:
+    mission_id = "showcase_interaction_seed_2-seed-1"
+
+    first = trajectory_mission.bounded_batch_id(
+        mission_id, "preposition-separate-altitudes", 1
+    )
+    second = trajectory_mission.bounded_batch_id(
+        mission_id, "preposition-horizontal-to-starts", 2
+    )
+
+    assert len(first) <= 64
+    assert len(second) <= 64
+    assert first != second
+    assert first == trajectory_mission.bounded_batch_id(
+        mission_id, "preposition-separate-altitudes", 1
+    )

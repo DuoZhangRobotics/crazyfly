@@ -34,6 +34,7 @@ from crazyfly.config import (
     point_in_geofence_frame,
 )
 from crazyfly.config_validator import validate
+from crazyfly.safety import continuous_minimum_separation
 from crazyfly.trajectory import (
     TrajectoryPlan,
     evaluate_plan,
@@ -54,6 +55,15 @@ MOCK_SAFETY = ROOT / "config" / "mock_safety.yaml"
 RETURN_BASE_ALTITUDE_M = 0.20
 RETURN_ALTITUDE_SPACING_M = 0.20
 RETURN_SPEED_M_S = 0.20
+
+
+def bounded_batch_id(mission_id: str, label: str, sequence: int) -> str:
+    """Return one readable, deterministic gateway batch ID of at most 64 characters."""
+    raw = f"{mission_id}-{label}-{sequence}"
+    if len(raw) <= 64:
+        return raw
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    return f"{raw[:55]}-{digest}"
 
 
 def staged_return_goals(
@@ -129,6 +139,37 @@ def staged_return_goals(
                     f"{label} violates live separation for {first} and {second}"
                 )
     return stages
+
+
+def staged_preposition_goals(
+    current: dict[str, tuple[float, float, float]],
+    starts: dict[str, tuple[float, float, float]],
+    safety: SafetyConfig,
+) -> tuple[tuple[str, dict[str, tuple[float, float, float]]], ...]:
+    """Build separated altitude lanes ending at exact trajectory starts."""
+    return_stages = staged_return_goals(current, starts, safety)
+    for name, point in starts.items():
+        if safety.has_geofence:
+            assert safety.geofence_min is not None
+            assert safety.geofence_max is not None
+            for axis, value in enumerate(point):
+                minimum = (
+                    safety.geofence_min[axis]
+                    + safety.soft_geofence_margin_m
+                )
+                maximum = (
+                    safety.geofence_max[axis]
+                    - safety.soft_geofence_margin_m
+                )
+                if not minimum <= value <= maximum:
+                    raise ConfigError(
+                        f"trajectory start for {name} is outside the effective geofence"
+                    )
+    return (
+        ("separate-altitudes", return_stages[0][1]),
+        ("horizontal-to-starts", return_stages[1][1]),
+        ("align-start-altitudes", dict(starts)),
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -732,7 +773,7 @@ def _run_mission(
     ) -> None:
         nonlocal batch_sequence
         batch_sequence += 1
-        batch_id = f"{mission_id}-{label}-{batch_sequence}"
+        batch_id = bounded_batch_id(mission_id, label, batch_sequence)
         publish_request(
             batch_publisher,
             {
@@ -822,12 +863,38 @@ def _run_mission(
             raise RuntimeError("safety gateway stopped takeoff")
         launch_positions = fresh_positions()
         start_positions = plan.start_positions
-        preposition_distance = max(
-            math.dist(launch_positions[name], start_positions[name])
-            for name in robot_names
+        preposition_minimum, _pair, _fraction = continuous_minimum_separation(
+            launch_positions, start_positions
         )
-        preposition_duration = max(2.0, preposition_distance / 0.20)
-        send_batch("preposition", start_positions, preposition_duration, 0.05)
+        if preposition_minimum >= safety.minimum_separation_m:
+            preposition_distance = max(
+                math.dist(launch_positions[name], start_positions[name])
+                for name in robot_names
+            )
+            preposition_duration = max(2.0, preposition_distance / 0.20)
+            send_batch(
+                "preposition-direct",
+                start_positions,
+                preposition_duration,
+                0.05,
+            )
+        else:
+            stage_start = launch_positions
+            for stage_label, goals in staged_preposition_goals(
+                launch_positions, start_positions, safety
+            ):
+                distance_m = max(
+                    math.dist(stage_start[name], goals[name])
+                    for name in robot_names
+                )
+                duration_s = max(2.0, distance_m / RETURN_SPEED_M_S)
+                send_batch(
+                    f"preposition-{stage_label}",
+                    goals,
+                    duration_s,
+                    0.05 if stage_label == "align-start-altitudes" else 0.08,
+                )
+                stage_start = goals
 
         mission_ready = True
         _publish_event(
