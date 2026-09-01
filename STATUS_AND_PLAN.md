@@ -46,6 +46,8 @@ replanned, fully inflated execution bundle are available.
 
 The current combined-demo profile accepts planned UR joint speed up to pi rad/s
 and piecewise acceleration up to 40 rad/s^2, with `servoJ` gain 1000. After the
+physical installation correction, every arm sample receives `+pi/2` on the
+first joint and planner-frame clearance checks subtract that same offset. After the
 arm returns to its park/home configuration, normal drone return uses sorted
 altitude lanes at 0.2 m intervals from 0.2 through 1.0 m, flies horizontally
 over captured anchors, and lands at no more than 0.2 m/s. The one-drone circle schema-v2

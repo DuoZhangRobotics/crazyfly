@@ -216,8 +216,11 @@ crazyfly_prrtc_demo /absolute/path/to/execution_bundle \
 
 The UR trajectory validator uses the lab-wide limits `pi rad/s` and
 `40 rad/s^2`; the RTDE executor uses `servoJ` at 100 Hz with lookahead 0.1 s
-and gain 1000. These values can still be overridden explicitly on the command
-line. The combined demo accepts missing offline return/abort corridors and
+and gain 1000. The physical UR5e installation adds `+pi/2` to the first
+(`shoulder_pan_joint`) coordinate of every main and park sample; the clearance
+model removes the same offset before evaluating planner-frame geometry. These
+values can still be overridden explicitly on the command line. The combined
+demo accepts missing offline return/abort corridors and
 measured arm/latency evidence by default, records that policy in the experiment
 manifest, and keeps all live flight and RTDE checks enabled.
 

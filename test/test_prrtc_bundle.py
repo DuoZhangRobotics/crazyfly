@@ -1,5 +1,6 @@
 import hashlib
 import json
+from math import pi
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,20 @@ def test_bundle_loads_and_interpolates_exact_joint_path(tmp_path: Path) -> None:
     assert bundle.main.evaluate(1.0) == pytest.approx((0.1,) * 6)
     assert bundle.main.evaluate(5.0) == pytest.approx((0.4,) * 6)
     assert bundle.park.duration_s == 2.0
+
+
+def test_bundle_applies_physical_first_joint_offset(tmp_path: Path) -> None:
+    bundle = load_execution_bundle(
+        write_bundle(tmp_path / "bundle"),
+        first_joint_offset_rad=pi / 2.0,
+    )
+
+    assert bundle.main.start[0] == pytest.approx(pi / 2.0)
+    assert bundle.main.end[0] == pytest.approx(0.4 + pi / 2.0)
+    assert bundle.park.start[0] == pytest.approx(0.4 + pi / 2.0)
+    assert bundle.manifest["physical_first_joint_offset_rad"] == pytest.approx(
+        pi / 2.0
+    )
 
 
 def test_bundle_hash_mismatch_is_rejected(tmp_path: Path) -> None:

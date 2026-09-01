@@ -384,14 +384,34 @@ class MockControl:
         pass
 
 
+def planner_joint_positions(
+    physical_joints_rad: tuple[float, ...],
+    first_joint_offset_rad: float,
+) -> tuple[float, ...]:
+    """Undo the physical base-mount offset for planner-frame geometry."""
+    if len(physical_joints_rad) != 6:
+        raise ConfigError("UR5e clearance model requires six joints")
+    return (
+        physical_joints_rad[0] - first_joint_offset_rad,
+        *physical_joints_rad[1:],
+    )
+
+
 class RobotDistanceModel:
-    def __init__(self, bundle: ExecutionBundle, *, required: bool) -> None:
+    def __init__(
+        self,
+        bundle: ExecutionBundle,
+        *,
+        required: bool,
+        first_joint_offset_rad: float = 0.0,
+    ) -> None:
         self.client_id = None
         self.robot_id = None
         self.joints: list[int] = []
         self.bodies: dict[str, int] = {}
         self.rotation = None
         self.translation = None
+        self.first_joint_offset_rad = first_joint_offset_rad
         scene_path = bundle.manifest.get("scene_path")
         if not isinstance(scene_path, str):
             if required:
@@ -437,7 +457,10 @@ class RobotDistanceModel:
         if self.robot_id is None:
             return {name: 10.0 for name in positions}
         p = self.pybullet
-        for joint, value in zip(self.joints, joints_rad):
+        planner_joints = planner_joint_positions(
+            joints_rad, self.first_joint_offset_rad
+        )
+        for joint, value in zip(self.joints, planner_joints):
             p.resetJointState(self.robot_id, joint, value)
         result = {}
         for name, position in positions.items():
@@ -524,6 +547,7 @@ def _parser() -> argparse.ArgumentParser:
         "--maximum-joint-acceleration-rad-s2", type=float, default=40.0
     )
     parser.add_argument("--servo-gain", type=float, default=1000.0)
+    parser.add_argument("--first-joint-offset-rad", type=float, default=pi / 2.0)
     return parser
 
 
@@ -542,6 +566,7 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
             args.maximum_joint_acceleration_rad_s2
         ),
         "servo_gain": args.servo_gain,
+        "first_joint_offset_rad": args.first_joint_offset_rad,
         "accepted_missing_physical_evidence": True,
         "return_altitudes_m": [0.2, 0.4, 0.6, 0.8, 1.0],
     }
@@ -559,7 +584,11 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         mission_node = MissionNode(
             mission_id, log, transform, bundle.robot_names
         )
-        distance_model = RobotDistanceModel(bundle, required=not args.mock)
+        distance_model = RobotDistanceModel(
+            bundle,
+            required=not args.mock,
+            first_joint_offset_rad=args.first_joint_offset_rad,
+        )
         safety = load_safety(DEFAULT_SAFETY)
         _, _, drone_plan = trajectory_from_payload(
             bundle.drone_payload, bundle.robot_names, safety
@@ -681,6 +710,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if not math.isfinite(args.servo_gain) or not 100 <= args.servo_gain <= 2000:
             raise ConfigError("servo gain must be from 100 to 2000")
+        if not math.isfinite(args.first_joint_offset_rad):
+            raise ConfigError("first joint offset must be finite")
         bundle = load_execution_bundle(
             args.bundle,
             require_clean=args.execute and not args.mock,
@@ -689,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.maximum_joint_acceleration_rad_s2
             ),
             accept_missing_physical_evidence=True,
+            first_joint_offset_rad=args.first_joint_offset_rad,
         )
         WorldBaseTransform.load(DEFAULT_CALIBRATION)
         _print_bundle(bundle)

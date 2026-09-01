@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import suppress
+from math import pi
 import sys
 import time
 
@@ -18,6 +19,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--robot-ip", default="172.16.90.197")
     parser.add_argument("--confirm-robot-ip")
+    parser.add_argument("--first-joint-offset-rad", type=float, default=pi / 2.0)
     return parser
 
 
@@ -25,7 +27,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     executor = None
     try:
-        bundle = load_execution_bundle(args.bundle, require_clean=args.execute)
+        bundle = load_execution_bundle(
+            args.bundle,
+            require_clean=args.execute,
+            first_joint_offset_rad=args.first_joint_offset_rad,
+        )
         print(
             f"PASS: UR5e main {bundle.main.duration_s:.3f} s, "
             f"park {bundle.park.duration_s:.3f} s"
