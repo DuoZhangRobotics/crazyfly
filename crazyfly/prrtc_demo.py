@@ -566,6 +566,7 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
             args.maximum_joint_acceleration_rad_s2
         ),
         "servo_gain": args.servo_gain,
+        "servo_lookahead_s": URExecutionConfig().servo_lookahead_s,
         "first_joint_offset_rad": args.first_joint_offset_rad,
         "accepted_missing_physical_evidence": True,
         "return_altitudes_m": [0.2, 0.4, 0.6, 0.8, 1.0],

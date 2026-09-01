@@ -215,7 +215,7 @@ crazyfly_prrtc_demo /absolute/path/to/execution_bundle \
 ```
 
 The UR trajectory validator uses the lab-wide limits `pi rad/s` and
-`40 rad/s^2`; the RTDE executor uses `servoJ` at 100 Hz with lookahead 0.1 s
+`40 rad/s^2`; the RTDE executor uses `servoJ` at 100 Hz with lookahead 0.03 s
 and gain 1000. The physical UR5e installation adds `+pi/2` to the first
 (`shoulder_pan_joint`) coordinate of every main and park sample; the clearance
 model removes the same offset before evaluating planner-frame geometry. These

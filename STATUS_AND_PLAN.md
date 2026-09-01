@@ -45,7 +45,8 @@ combined execution remains locked until clean repositories and a newly
 replanned, fully inflated execution bundle are available.
 
 The current combined-demo profile accepts planned UR joint speed up to pi rad/s
-and piecewise acceleration up to 40 rad/s^2, with `servoJ` gain 1000. After the
+and piecewise acceleration up to 40 rad/s^2, with `servoJ` lookahead 0.03 s and
+gain 1000. After the
 physical installation correction, every arm sample receives `+pi/2` on the
 first joint and planner-frame clearance checks subtract that same offset. After the
 arm returns to its park/home configuration, normal drone return uses sorted

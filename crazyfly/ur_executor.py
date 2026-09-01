@@ -34,7 +34,7 @@ class URExecutionConfig:
     frequency_hz: float = 100.0
     move_speed_rad_s: float = 0.25
     move_acceleration_rad_s2: float = 0.25
-    servo_lookahead_s: float = 0.1
+    servo_lookahead_s: float = 0.03
     servo_gain: float = 1000.0
     ready_tolerance_rad: float = 0.03
     ready_stable_s: float = 0.5

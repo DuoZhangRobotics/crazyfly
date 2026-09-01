@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from crazyfly.prrtc_bundle import JointSample, JointTrajectory
+from crazyfly import ur_trajectory_cli
 from crazyfly.ur_executor import TimedURExecutor, URExecutionConfig
 
 
@@ -106,7 +107,24 @@ def test_executor_prepositions_and_runs_on_scheduled_timeline() -> None:
     assert samples[-1].commanded_rad == pytest.approx((0.1,) * 6)
     assert receive.q == pytest.approx([0.1] * 6)
     assert control.servo_parameters
-    assert control.servo_parameters[0] == pytest.approx((0.01, 0.1, 1000.0))
+    assert control.servo_parameters[0] == pytest.approx((0.01, 0.03, 1000.0))
+
+
+def test_arm_only_cli_uses_approved_test_settings() -> None:
+    args = ur_trajectory_cli._parser().parse_args(["bundle"])
+
+    assert args.servo_lookahead_s == 0.03
+    assert args.servo_gain == 1000.0
+    assert args.maximum_joint_error_rad == 0.20
+
+
+def test_arm_only_cli_rejects_unsupported_lookahead(capsys) -> None:
+    result = ur_trajectory_cli.main(
+        ["bundle", "--servo-lookahead-s", "0.30"]
+    )
+
+    assert result == 2
+    assert "0.03 to 0.20" in capsys.readouterr().err
 
 
 def test_executor_aborts_after_three_joint_error_cycles() -> None:
