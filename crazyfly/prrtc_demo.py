@@ -39,6 +39,7 @@ from .ur_executor import (
 
 ROOT = Path(__file__).resolve().parents[1]
 UR_TOOLS_ROOT = Path("/home/duo/ur_tools")
+PRRTC_ROOT = Path("/home/duo/pRRTC")
 DEFAULT_CALIBRATION = UR_TOOLS_ROOT / "config" / "optitrack_to_ur_base.yaml"
 DEFAULT_OUTPUT_ROOT = ROOT / "combined_experiments"
 DEFAULT_SAFETY = ROOT / "config" / "local" / "safety.yaml"
@@ -89,7 +90,11 @@ class CombinedLog:
             "repositories": {
                 "crazyfly": git_state(ROOT),
                 "ur_tools": git_state(UR_TOOLS_ROOT),
-                "pRRTC": bundle.manifest.get("pRRTC"),
+                "pRRTC": {
+                    "bundle_source": bundle.manifest.get("pRRTC_source")
+                    or bundle.manifest.get("pRRTC"),
+                    "current_checkout": git_state(PRRTC_ROOT),
+                },
             },
             "calibration": file_record(DEFAULT_CALIBRATION),
             "status": "incomplete",
@@ -762,7 +767,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError("first joint offset must be finite")
         bundle = load_execution_bundle(
             args.bundle,
-            require_clean=args.execute and not args.mock,
+            require_clean=False,
             maximum_joint_speed_rad_s=args.maximum_joint_speed_rad_s,
             maximum_joint_acceleration_rad_s2=(
                 args.maximum_joint_acceleration_rad_s2
@@ -801,10 +806,15 @@ def main(argv: list[str] | None = None) -> int:
                 bundle,
                 accept_missing_evidence=True,
             )
-            states = (git_state(ROOT), git_state(UR_TOOLS_ROOT))
+            states = (
+                git_state(ROOT),
+                git_state(UR_TOOLS_ROOT),
+                git_state(PRRTC_ROOT),
+            )
             if any(state["dirty"] for state in states):
                 raise ConfigError(
-                    "physical execution requires clean crazyfly and ur_tools repositories"
+                    "physical execution requires clean crazyfly, ur_tools, "
+                    "and current pRRTC repositories"
                 )
         output = run_combined(args, bundle)
         print(f"COMBINED MISSION COMPLETE: {output}")

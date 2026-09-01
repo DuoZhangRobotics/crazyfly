@@ -62,6 +62,39 @@ def test_combined_execution_requires_matching_robot_confirmation(
     assert "confirm-robot-ip" in capsys.readouterr().err
 
 
+def test_physical_execution_uses_clean_current_checkouts_not_export_flag(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured = {}
+
+    def fake_load(*_args, **kwargs):
+        captured["require_clean"] = kwargs["require_clean"]
+        return _bundle()
+
+    monkeypatch.setattr(prrtc_demo, "load_execution_bundle", fake_load)
+    monkeypatch.setattr(
+        prrtc_demo.WorldBaseTransform, "load", lambda *_a, **_k: object()
+    )
+    monkeypatch.setattr(
+        prrtc_demo, "validate_physical_metadata", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        prrtc_demo,
+        "git_state",
+        lambda path: {"path": str(path), "commit": "abc", "dirty": False},
+    )
+    monkeypatch.setattr(
+        prrtc_demo, "run_combined", lambda *_a, **_k: tmp_path
+    )
+
+    result = prrtc_demo.main(
+        ["bundle", "--execute", "--confirm-robot-ip", "172.16.90.197"]
+    )
+
+    assert result == 0
+    assert captured["require_clean"] is False
+
+
 def test_combined_defaults_use_approved_ur_limits_and_gain() -> None:
     args = prrtc_demo._parser().parse_args(["bundle"])
 

@@ -214,6 +214,13 @@ crazyfly_prrtc_demo /absolute/path/to/execution_bundle \
   --execute --confirm-robot-ip 172.16.90.197
 ```
 
+Bundle hashes remain authoritative even when an exporter recorded its source
+worktree as dirty. Physical execution verifies the current `/home/duo/pRRTC`
+checkout is clean, together with clean `crazyfly` and `ur_tools` checkouts,
+rather than rejecting an otherwise hash-valid bundle solely for that embedded
+historical flag. Both the embedded source state and current checkout state are
+preserved in the combined run log.
+
 Slow both systems together by supplying either a duration multiplier or an arm
 speed cap. Never slow only one side of a synchronized pRRTC plan:
 
