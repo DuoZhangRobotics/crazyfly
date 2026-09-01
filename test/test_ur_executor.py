@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -125,6 +126,16 @@ def test_arm_only_cli_rejects_unsupported_lookahead(capsys) -> None:
 
     assert result == 2
     assert "0.03 to 0.20" in capsys.readouterr().err
+
+
+def test_arm_only_provenance_uses_current_checkout(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        ur_trajectory_cli.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=""),
+    )
+
+    assert ur_trajectory_cli.repository_is_clean(tmp_path)
 
 
 def test_executor_aborts_after_three_joint_error_cycles() -> None:

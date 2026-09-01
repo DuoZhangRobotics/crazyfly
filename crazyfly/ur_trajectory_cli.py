@@ -7,6 +7,8 @@ from contextlib import suppress
 from dataclasses import replace
 import math
 from math import pi
+from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -17,6 +19,22 @@ from .prrtc_bundle import (
     scale_trajectory_time,
 )
 from .ur_executor import TimedURExecutor, URExecutionConfig, connect_ur5e
+
+
+ROOT = Path(__file__).resolve().parents[1]
+UR_TOOLS_ROOT = Path("/home/duo/ur_tools")
+PRRTC_ROOT = Path("/home/duo/pRRTC")
+
+
+def repository_is_clean(path: Path) -> bool:
+    """Return whether one current checkout has no uncommitted changes."""
+    return not subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -50,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError("maximum joint error must be positive and finite")
         bundle = load_execution_bundle(
             args.bundle,
-            require_clean=args.execute,
+            require_clean=False,
             first_joint_offset_rad=args.first_joint_offset_rad,
             accept_missing_physical_evidence=True,
         )
@@ -93,6 +111,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.confirm_robot_ip != args.robot_ip:
             raise ConfigError("--confirm-robot-ip must match the UR5e robot IP")
+        repositories = (ROOT, UR_TOOLS_ROOT, PRRTC_ROOT)
+        if not all(repository_is_clean(path) for path in repositories):
+            raise ConfigError(
+                "physical execution requires clean crazyfly, ur_tools, "
+                "and current pRRTC repositories"
+            )
         control, receive = connect_ur5e(args.robot_ip)
         executor = TimedURExecutor(
             control,
