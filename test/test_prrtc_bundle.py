@@ -220,8 +220,26 @@ def test_requested_global_joint_limits_accept_circle_one_dynamics(
     assert bundle.main.duration_s == 1.0
 
 
+@pytest.mark.parametrize(
+    ("goal_key", "park_key", "return_key"),
+    [
+        (
+            "goal_hold_through_cf1_brake",
+            "park_path_with_cf1_held",
+            "cf1_return_after_park",
+        ),
+        (
+            "goal_hold_through_drone_brake",
+            "park_path_with_drones_held",
+            "drone_return_after_park",
+        ),
+    ],
+)
 def test_prrtc_v2_bundle_normalizes_names_and_absolute_park_time(
     tmp_path: Path,
+    goal_key: str,
+    park_key: str,
+    return_key: str,
 ) -> None:
     root = write_bundle(tmp_path / "bundle")
     park_path = root / "ur5e_park_trajectory.json"
@@ -234,9 +252,9 @@ def test_prrtc_v2_bundle_normalizes_names_and_absolute_park_time(
     validation_path = root / "validation.json"
     _write(validation_path, {
         "offline_export_eligible": True,
-        "goal_hold_through_cf1_brake": {"collision_free": True},
-        "park_path_with_cf1_held": {"collision_free": True},
-        "cf1_return_after_park": {"collision_free": True},
+        goal_key: {"collision_free": True},
+        park_key: {"collision_free": True},
+        return_key: {"collision_free": True},
         "vertical_land_abort_corridors": {"collision_free": True},
     })
     hashes = {

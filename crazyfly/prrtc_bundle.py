@@ -307,13 +307,18 @@ def _normalize_v2_bundle(
 
     normalized_validation = deepcopy(dict(validation))
     normalized_validation["post_goal"] = {
-        "goal_hold": validation.get("goal_hold_through_cf1_brake"),
+        "goal_hold": (
+            validation.get("goal_hold_through_drone_brake")
+            or validation.get("goal_hold_through_cf1_brake")
+        ),
     }
-    normalized_validation["arm_park"] = validation.get(
-        "park_path_with_cf1_held"
+    normalized_validation["arm_park"] = (
+        validation.get("park_path_with_drones_held")
+        or validation.get("park_path_with_cf1_held")
     )
-    normalized_validation["drone_return"] = validation.get(
-        "cf1_return_after_park"
+    normalized_validation["drone_return"] = (
+        validation.get("drone_return_after_park")
+        or validation.get("cf1_return_after_park")
     )
     normalized_validation["abort_land_in_place"] = validation.get(
         "vertical_land_abort_corridors"
