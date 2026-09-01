@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from math import pi
 
 from ur_tools.optitrack.frame_transform import WorldBaseTransform
@@ -24,6 +24,8 @@ from .config import ConfigError, load_safety
 from .prrtc_bundle import (
     ExecutionBundle,
     load_execution_bundle,
+    maximum_joint_speed,
+    scale_trajectory_time,
     validate_physical_metadata,
 )
 from .trajectory import evaluate_plan, trajectory_from_payload
@@ -548,14 +550,51 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--servo-gain", type=float, default=1000.0)
     parser.add_argument("--first-joint-offset-rad", type=float, default=pi / 2.0)
+    playback = parser.add_mutually_exclusive_group()
+    playback.add_argument(
+        "--playback-timescale",
+        type=float,
+        help="duration multiplier; 2.0 runs both systems at half speed",
+    )
+    playback.add_argument(
+        "--maximum-arm-speed-rad-s",
+        type=float,
+        help="derive a shared slowdown that caps every arm joint speed",
+    )
     return parser
 
 
-def _print_bundle(bundle: ExecutionBundle) -> None:
+def resolve_playback_timescale(
+    bundle: ExecutionBundle,
+    *,
+    playback_timescale: float | None,
+    maximum_arm_speed_rad_s: float | None,
+) -> float:
+    """Resolve one shared duration multiplier for the arm and drones."""
+    if playback_timescale is not None:
+        if not math.isfinite(playback_timescale) or playback_timescale < 1.0:
+            raise ConfigError("playback timescale must be finite and at least 1.0")
+        return playback_timescale
+    if maximum_arm_speed_rad_s is None:
+        return 1.0
+    if (
+        not math.isfinite(maximum_arm_speed_rad_s)
+        or maximum_arm_speed_rad_s <= 0
+    ):
+        raise ConfigError("maximum arm speed must be positive and finite")
+    source_maximum = max(
+        maximum_joint_speed(bundle.main),
+        maximum_joint_speed(bundle.park),
+    )
+    return max(1.0, source_maximum / maximum_arm_speed_rad_s)
+
+
+def _print_bundle(bundle: ExecutionBundle, timescale: float = 1.0) -> None:
     print(f"PASS: pRRTC bundle {bundle.bundle_id!r} is valid")
     print(f"  drones:       {', '.join(bundle.robot_names)}")
     print(f"  arm duration: {bundle.main.duration_s:.3f} s")
     print(f"  park duration:{bundle.park.duration_s:.3f} s")
+    print(f"  playback scale:{timescale:.6f}x duration")
 
 
 def run_combined(args, bundle: ExecutionBundle) -> Path:
@@ -568,6 +607,7 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         "servo_gain": args.servo_gain,
         "servo_lookahead_s": URExecutionConfig().servo_lookahead_s,
         "first_joint_offset_rad": args.first_joint_offset_rad,
+        "playback_timescale": args.playback_timescale,
         "accepted_missing_physical_evidence": True,
         "return_altitudes_m": [0.2, 0.4, 0.6, 0.8, 1.0],
     }
@@ -600,7 +640,9 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
             str(bundle.root / "crazyfly_trajectory_payload.json"),
             "--robots", ",".join(bundle.robot_names),
             "--execute", "--wait-for-start", "--wait-for-return",
-            "--start-timeout-s", "120", "--return-timeout-s", "10",
+            "--start-timeout-s", "120",
+            "--return-timeout-s", str(max(10.0, bundle.park.duration_s + 5.0)),
+            "--playback-timescale", str(args.playback_timescale),
             "--output-root", str(log.root / "crazyfly"),
         ]
         if args.mock:
@@ -630,7 +672,8 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         def record_sample(sample: URSample) -> None:
             log.arm_sample(sample)
             drone_elapsed = min(
-                max(0.0, sample.monotonic_s - start_at),
+                max(0.0, sample.monotonic_s - start_at)
+                / args.playback_timescale,
                 drone_plan.duration_s,
             )
             commanded = evaluate_plan(drone_plan, drone_elapsed)
@@ -650,7 +693,11 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         start_skew = abs(main_samples[0].monotonic_s - mission_node.drone_started_at)
         if start_skew > 0.05:
             raise RuntimeError(f"motion start skew exceeded 50 ms: {start_skew:.3f}")
-        hold_deadline = start_at + float(bundle.drone_payload["duration_s"]) + 3.0
+        hold_deadline = (
+            start_at
+            + float(bundle.drone_payload["duration_s"]) * args.playback_timescale
+            + 3.0
+        )
         if not executor.hold_until(
             bundle.main.end,
             hold_deadline,
@@ -723,8 +770,27 @@ def main(argv: list[str] | None = None) -> int:
             accept_missing_physical_evidence=True,
             first_joint_offset_rad=args.first_joint_offset_rad,
         )
+        args.playback_timescale = resolve_playback_timescale(
+            bundle,
+            playback_timescale=args.playback_timescale,
+            maximum_arm_speed_rad_s=args.maximum_arm_speed_rad_s,
+        )
+        safety = load_safety(DEFAULT_SAFETY)
+        scaled_drone_duration = (
+            float(bundle.drone_payload["duration_s"])
+            * args.playback_timescale
+        )
+        if scaled_drone_duration > safety.maximum_trajectory_duration_s:
+            raise ConfigError(
+                "scaled drone duration exceeds the configured mission limit"
+            )
+        bundle = replace(
+            bundle,
+            main=scale_trajectory_time(bundle.main, args.playback_timescale),
+            park=scale_trajectory_time(bundle.park, args.playback_timescale),
+        )
         WorldBaseTransform.load(DEFAULT_CALIBRATION)
-        _print_bundle(bundle)
+        _print_bundle(bundle, args.playback_timescale)
         if not args.execute:
             print("DRY RUN: no ROS process, RTDE connection, or command was started")
             return 0

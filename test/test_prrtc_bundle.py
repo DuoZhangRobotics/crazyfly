@@ -8,7 +8,11 @@ import pytest
 from crazyfly.config import ConfigError
 from crazyfly.prrtc_bundle import (
     JOINT_NAMES,
+    JointSample,
+    JointTrajectory,
     load_execution_bundle,
+    maximum_joint_speed,
+    scale_trajectory_time,
     validate_physical_metadata,
 )
 
@@ -121,6 +125,22 @@ def test_bundle_applies_physical_first_joint_offset(tmp_path: Path) -> None:
     assert bundle.manifest["physical_first_joint_offset_rad"] == pytest.approx(
         pi / 2.0
     )
+
+
+def test_joint_trajectory_timescale_reduces_speed() -> None:
+    trajectory = JointTrajectory(
+        "scaled",
+        (
+            JointSample(0.0, (0.0,) * 6),
+            JointSample(1.0, (1.5,) * 6),
+        ),
+    )
+
+    scaled = scale_trajectory_time(trajectory, 3.0)
+
+    assert scaled.duration_s == 3.0
+    assert maximum_joint_speed(trajectory) == pytest.approx(1.5)
+    assert maximum_joint_speed(scaled) == pytest.approx(0.5)
 
 
 def test_bundle_hash_mismatch_is_rejected(tmp_path: Path) -> None:

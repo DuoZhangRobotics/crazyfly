@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import argparse
 from contextlib import suppress
+from dataclasses import replace
 import math
 from math import pi
 import sys
 import time
 
 from .config import ConfigError
-from .prrtc_bundle import load_execution_bundle
+from .prrtc_bundle import (
+    load_execution_bundle,
+    maximum_joint_speed,
+    scale_trajectory_time,
+)
 from .ur_executor import TimedURExecutor, URExecutionConfig, connect_ur5e
 
 
@@ -24,6 +29,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--servo-lookahead-s", type=float, default=0.03)
     parser.add_argument("--servo-gain", type=float, default=1000.0)
     parser.add_argument("--maximum-joint-error-rad", type=float, default=0.20)
+    playback = parser.add_mutually_exclusive_group()
+    playback.add_argument("--playback-timescale", type=float)
+    playback.add_argument("--maximum-arm-speed-rad-s", type=float)
     return parser
 
 
@@ -46,10 +54,40 @@ def main(argv: list[str] | None = None) -> int:
             first_joint_offset_rad=args.first_joint_offset_rad,
             accept_missing_physical_evidence=True,
         )
+        if args.playback_timescale is not None:
+            if (
+                not math.isfinite(args.playback_timescale)
+                or args.playback_timescale < 1.0
+            ):
+                raise ConfigError(
+                    "playback timescale must be finite and at least 1.0"
+                )
+            timescale = args.playback_timescale
+        elif args.maximum_arm_speed_rad_s is not None:
+            if (
+                not math.isfinite(args.maximum_arm_speed_rad_s)
+                or args.maximum_arm_speed_rad_s <= 0
+            ):
+                raise ConfigError("maximum arm speed must be positive and finite")
+            timescale = max(
+                1.0,
+                maximum_joint_speed(bundle.main)
+                / args.maximum_arm_speed_rad_s,
+                maximum_joint_speed(bundle.park)
+                / args.maximum_arm_speed_rad_s,
+            )
+        else:
+            timescale = 1.0
+        bundle = replace(
+            bundle,
+            main=scale_trajectory_time(bundle.main, timescale),
+            park=scale_trajectory_time(bundle.park, timescale),
+        )
         print(
             f"PASS: UR5e main {bundle.main.duration_s:.3f} s, "
             f"park {bundle.park.duration_s:.3f} s"
         )
+        print(f"Playback scale: {timescale:.6f}x duration")
         if not args.execute:
             print("DRY RUN: no RTDE connection or robot command was started")
             return 0

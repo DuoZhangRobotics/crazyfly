@@ -296,6 +296,29 @@ def test_trajectory_mission_report_uses_timed_reference() -> None:
     assert report["battery_minimum_v"] == {"cf1": 3.9}
 
 
+def test_trajectory_mission_report_uses_scaled_reference_clock() -> None:
+    fleet = load_fleet(ROOT / "config" / "mock_crazyflies.yaml")
+    safety = load_safety(ROOT / "config" / "mock_safety.yaml")
+    plan = load_trajectory(
+        ROOT / "config" / "trajectories" / "mock_square.yaml", fleet, safety
+    )
+    started_at = 100.0
+    source_times = (0.0, 4.0, 8.0, 12.0, 16.0)
+    samples = [
+        (started_at + source_time * 2.0, evaluate_plan(plan, source_time))
+        for source_time in source_times
+    ]
+
+    report = trajectory_mission.mission_report(
+        plan, started_at, samples, {"cf1": 3.9}, playback_timescale=2.0
+    )
+
+    assert report["tracking_error"]["cf1"]["maximum_m"] == pytest.approx(0.0)
+    assert report["source_duration_s"] == pytest.approx(16.0)
+    assert report["duration_s"] == pytest.approx(32.0)
+    assert report["playback_timescale"] == pytest.approx(2.0)
+
+
 def test_trajectory_mission_rejects_invalid_start_timeout(capsys) -> None:
     result = trajectory_mission.main(
         [
@@ -308,6 +331,20 @@ def test_trajectory_mission_rejects_invalid_start_timeout(capsys) -> None:
 
     assert result == 2
     assert "positive and finite" in capsys.readouterr().err
+
+
+def test_trajectory_mission_rejects_speedup_timescale(capsys) -> None:
+    result = trajectory_mission.main(
+        [
+            str(ROOT / "config" / "trajectories" / "mock_square.yaml"),
+            "--mock",
+            "--playback-timescale",
+            "0.5",
+        ]
+    )
+
+    assert result == 2
+    assert "at least 1.0" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

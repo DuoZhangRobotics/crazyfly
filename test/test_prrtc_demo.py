@@ -1,17 +1,31 @@
 from types import SimpleNamespace
 from math import pi
+from pathlib import Path
 
 import pytest
 
 from crazyfly import prrtc_demo
+from crazyfly.prrtc_bundle import ExecutionBundle, JointSample, JointTrajectory
 
 
 def _bundle():
-    return SimpleNamespace(
+    main = JointTrajectory(
+        "main",
+        (JointSample(0.0, (0.0,) * 6), JointSample(4.0, (0.4,) * 6)),
+    )
+    park = JointTrajectory(
+        "park",
+        (JointSample(0.0, (0.4,) * 6), JointSample(2.0, (0.2,) * 6)),
+    )
+    return ExecutionBundle(
+        root=Path("."),
         bundle_id="bundle-1",
+        drone_payload={"duration_s": 4.0},
+        main=main,
+        park=park,
+        validation={},
+        manifest={},
         robot_names=("cf1",),
-        main=SimpleNamespace(duration_s=4.0),
-        park=SimpleNamespace(duration_s=2.0),
     )
 
 
@@ -63,3 +77,23 @@ def test_clearance_model_undoes_physical_first_joint_offset() -> None:
     planner = prrtc_demo.planner_joint_positions(physical, pi / 2.0)
 
     assert planner == pytest.approx((0.2, -1.0, 1.2, -2.0, -1.5, 0.3))
+
+
+def test_maximum_arm_speed_resolves_shared_slowdown() -> None:
+    main = JointTrajectory(
+        "main",
+        (JointSample(0.0, (0.0,) * 6), JointSample(1.0, (1.5,) * 6)),
+    )
+    park = JointTrajectory(
+        "park",
+        (JointSample(0.0, (1.5,) * 6), JointSample(1.0, (1.0,) * 6)),
+    )
+    bundle = SimpleNamespace(main=main, park=park)
+
+    timescale = prrtc_demo.resolve_playback_timescale(
+        bundle,
+        playback_timescale=None,
+        maximum_arm_speed_rad_s=0.5,
+    )
+
+    assert timescale == pytest.approx(3.0)

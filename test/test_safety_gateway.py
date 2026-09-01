@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from crazyfly.config import load_safety
 from crazyfly.safety import Evaluation, SafetyAction, SafetyState
 from crazyfly.safety_gateway import (
@@ -310,13 +312,13 @@ def test_trajectory_upload_requires_disarmed_state_and_ready_services() -> None:
     assert "unavailable" in gateway._last_rejection
 
 
-def _start_message(mission_id="mission-1", trajectory_id=3):
+def _start_message(mission_id="mission-1", trajectory_id=3, timescale=1.0):
     return SimpleNamespace(
         data=json.dumps(
             {
                 "mission_id": mission_id,
                 "trajectory_id": trajectory_id,
-                "timescale": 1.0,
+                "timescale": timescale,
             }
         )
     )
@@ -346,6 +348,38 @@ def test_trajectory_start_requires_matching_prepared_mission_and_position() -> N
     gateway._trajectory_start_callback(_start_message())
     assert len(gateway.start_trajectory_client.requests) == 1
     assert gateway.events[-1][0][:2] == ("trajectory_start", "rejected")
+
+
+def test_trajectory_start_propagates_safe_slowdown() -> None:
+    gateway, _upload, plan, _message = _trajectory_gateway()
+    gateway._prepared_trajectory = PreparedTrajectory("mission-1", 3, plan)
+    gateway.machine.state = SafetyState.FLYING
+    gateway.machine.operator_enabled = True
+    gateway.machine.health["cf1"].position = plan.start_positions["cf1"]
+    gateway.last_evaluation = Evaluation(
+        SafetyState.FLYING, SafetyAction.NONE, (), True
+    )
+
+    gateway._trajectory_start_callback(_start_message(timescale=2.5))
+
+    request = gateway.start_trajectory_client.requests[0]
+    assert request.timescale == pytest.approx(2.5)
+    assert gateway._trajectory_end_at == pytest.approx(
+        10.0 + plan.duration_s * 2.5
+    )
+    details = json.loads(gateway.events[-1][1]["details"])
+    assert details["duration_s"] == pytest.approx(plan.duration_s * 2.5)
+    assert details["timescale"] == pytest.approx(2.5)
+
+
+def test_trajectory_start_rejects_speedup_timescale() -> None:
+    gateway, _upload, plan, _message = _trajectory_gateway()
+    gateway._prepared_trajectory = PreparedTrajectory("mission-1", 3, plan)
+
+    gateway._trajectory_start_callback(_start_message(timescale=0.5))
+
+    assert gateway.start_trajectory_client.requests == []
+    assert "at least 1.0" in gateway._last_rejection
 
 
 def test_trajectory_start_rejects_wrong_id_and_unsettled_start() -> None:

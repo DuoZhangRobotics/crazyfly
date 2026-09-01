@@ -49,6 +49,7 @@ class MockRobot:
     trajectories: dict[int, list[object]] = field(default_factory=dict)
     active_trajectory_id: int | None = None
     trajectory_started_at: float | None = None
+    trajectory_timescale: float = 1.0
     active_motion: MockMotion | None = None
 
 
@@ -158,6 +159,7 @@ class MockStack(Node):
             self.robots[name].active_motion = None
             self.robots[name].active_trajectory_id = None
             self.robots[name].trajectory_started_at = None
+            self.robots[name].trajectory_timescale = 1.0
         return response
 
     def _takeoff_callback(
@@ -188,6 +190,7 @@ class MockStack(Node):
         )
         robot.active_trajectory_id = None
         robot.trajectory_started_at = None
+        robot.trajectory_timescale = 1.0
         return response
 
     def _goto_callback(
@@ -225,6 +228,7 @@ class MockStack(Node):
                 robot.active_motion = None
                 robot.active_trajectory_id = trajectory_id
                 robot.trajectory_started_at = started_at
+                robot.trajectory_timescale = max(1.0, float(request.timescale))
         return response
 
     @staticmethod
@@ -272,7 +276,10 @@ class MockStack(Node):
             ):
                 continue
             pieces = robot.trajectories[robot.active_trajectory_id]
-            elapsed = max(0.0, now - robot.trajectory_started_at)
+            elapsed = (
+                max(0.0, now - robot.trajectory_started_at)
+                / robot.trajectory_timescale
+            )
             total_duration = sum(
                 self._duration_seconds(piece.duration) for piece in pieces
             )
@@ -297,6 +304,7 @@ class MockStack(Node):
             if elapsed >= total_duration:
                 robot.active_trajectory_id = None
                 robot.trajectory_started_at = None
+                robot.trajectory_timescale = 1.0
 
     def _emergency_callback(
         self, _request: Empty.Request, response: Empty.Response
@@ -307,6 +315,7 @@ class MockStack(Node):
             robot.active_motion = None
             robot.active_trajectory_id = None
             robot.trajectory_started_at = None
+            robot.trajectory_timescale = 1.0
         return response
 
     def _drop_tracking_callback(

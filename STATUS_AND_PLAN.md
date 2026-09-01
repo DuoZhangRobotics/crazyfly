@@ -56,6 +56,13 @@ bundle passes dry validation and the complete simulated run with a 9.6 ms start
 skew. Missing offline recovery/measurement evidence requires an explicit,
 logged combined-demo policy acknowledgement; live safety gates remain active.
 
+Coordinated playback slowdown is available through either
+`--playback-timescale` or `--maximum-arm-speed-rad-s`. The resolved duration
+multiplier is applied to the UR main/park timestamps, Crazyflie onboard
+trajectory timescale, endpoint-hold timeout, reference tracking, and mock
+clock. The circle-one 0.5 rad/s cap resolves to 2.905464x duration (20.048 s
+main arm motion and 22.227 s through the drone brake).
+
 The synchronized hover and the all-four staged sequence have subsequently
 passed. Atomic coordinated movement is implemented with two modes: an 8 cm
 formation translation-and-return and a four-step cyclic position permutation.

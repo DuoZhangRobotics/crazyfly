@@ -154,6 +154,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wait-for-return", action="store_true")
     parser.add_argument("--return-timeout-s", type=float, default=10.0)
     parser.add_argument(
+        "--playback-timescale",
+        type=float,
+        default=1.0,
+        help="duration multiplier; values above 1.0 slow the trajectory",
+    )
+    parser.add_argument(
         "--trajectory-id",
         type=int,
         help="waypoint missions only; compiled payloads carry their own ID",
@@ -282,13 +288,15 @@ def mission_report(
     started_at: float,
     pose_samples: list[tuple[float, dict[str, tuple[float, float, float]]]],
     battery_minima: dict[str, float],
+    playback_timescale: float = 1.0,
 ) -> dict[str, object]:
     errors = {name: [] for name in plan.trajectories}
     minimum_separation: float | None = None
     motion_started_at: dict[str, float] = {}
     measured_starts: dict[str, tuple[float, float, float]] | None = None
     for timestamp, positions in pose_samples:
-        elapsed = timestamp - started_at
+        physical_elapsed = timestamp - started_at
+        elapsed = physical_elapsed / playback_timescale
         if not 0.0 <= elapsed <= plan.duration_s or set(positions) != set(
             plan.trajectories
         ):
@@ -303,7 +311,7 @@ def mission_report(
                 name not in motion_started_at
                 and math.dist(positions[name], measured_starts[name]) >= 0.01
             ):
-                motion_started_at[name] = elapsed
+                motion_started_at[name] = physical_elapsed
         for first, second in combinations(sorted(positions), 2):
             separation = math.dist(positions[first], positions[second])
             minimum_separation = (
@@ -325,7 +333,9 @@ def mission_report(
         plan.metrics is not None and plan.metrics.maximum_speed_m_s >= 0.10
     )
     return {
-        "duration_s": plan.duration_s,
+        "duration_s": plan.duration_s * playback_timescale,
+        "source_duration_s": plan.duration_s,
+        "playback_timescale": playback_timescale,
         "tracking_error": per_robot,
         "minimum_separation_m": minimum_separation,
         "motion_start_skew_s": (
@@ -349,6 +359,7 @@ def _run_mission(
     start_timeout_s: float,
     wait_for_return: bool,
     return_timeout_s: float,
+    playback_timescale: float,
     skip_estimator_gate: bool,
     trajectory_record: dict[str, object],
 ) -> dict[str, object]:
@@ -851,13 +862,13 @@ def _run_mission(
             {
                 "mission_id": mission_id,
                 "trajectory_id": trajectory_id,
-                "timescale": 1.0,
+                "timescale": playback_timescale,
             },
         )
         wait_result("trajectory_start", mission_id, 3.0)
         if trajectory_started_at is None:
             trajectory_started_at = time.monotonic()
-        spin_for(plan.duration_s + 0.5)
+        spin_for(plan.duration_s * playback_timescale + 0.5)
         if safety_action or abort_requested:
             raise RuntimeError("safety gateway stopped trajectory execution")
         wait_settled(plan.end_positions, 0.08, 0.3, 2.0)
@@ -865,7 +876,12 @@ def _run_mission(
             command_publisher,
             "trajectory_complete",
             "accepted",
-            {"mission_id": mission_id, "duration_s": plan.duration_s},
+            {
+                "mission_id": mission_id,
+                "duration_s": plan.duration_s * playback_timescale,
+                "source_duration_s": plan.duration_s,
+                "playback_timescale": playback_timescale,
+            },
         )
 
         endpoint_ready = True
@@ -905,7 +921,11 @@ def _run_mission(
         spin_for(landing_duration_s + 0.5)
         flight_active = False
         report = mission_report(
-            plan, trajectory_started_at, pose_samples, battery_minima
+            plan,
+            trajectory_started_at,
+            pose_samples,
+            battery_minima,
+            playback_timescale,
         )
         completed = dict(report)
         completed["mission_id"] = mission_id
@@ -986,6 +1006,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError("--start-timeout-s must be positive and finite")
         if not math.isfinite(args.return_timeout_s) or args.return_timeout_s <= 0:
             raise ConfigError("--return-timeout-s must be positive and finite")
+        if (
+            not math.isfinite(args.playback_timescale)
+            or args.playback_timescale < 1.0
+        ):
+            raise ConfigError("--playback-timescale must be finite and at least 1.0")
         if args.trajectory_id is not None and not 0 <= args.trajectory_id <= 255:
             raise ConfigError("--trajectory-id must be from 0 to 255")
         fleet_path = Path(
@@ -1025,6 +1050,13 @@ def main(argv: list[str] | None = None) -> int:
             trajectory_id=trajectory_id,
             plan=plan,
         )
+        if (
+            plan.duration_s * args.playback_timescale
+            > safety.maximum_trajectory_duration_s
+        ):
+            raise ConfigError(
+                "scaled trajectory duration exceeds the configured limit"
+            )
         _print_plan(plan)
         if not args.execute:
             print("DRY RUN: no ROS process, radio connection, or command was started")
@@ -1055,6 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
                 start_timeout_s=args.start_timeout_s,
                 wait_for_return=args.wait_for_return,
                 return_timeout_s=args.return_timeout_s,
+                playback_timescale=args.playback_timescale,
                 skip_estimator_gate=True,
                 trajectory_record=trajectory_record,
             )
@@ -1097,6 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
                     start_timeout_s=args.start_timeout_s,
                     wait_for_return=args.wait_for_return,
                     return_timeout_s=args.return_timeout_s,
+                    playback_timescale=args.playback_timescale,
                     skip_estimator_gate=False,
                     trajectory_record=trajectory_record,
                 )

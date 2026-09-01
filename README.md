@@ -214,6 +214,22 @@ crazyfly_prrtc_demo /absolute/path/to/execution_bundle \
   --execute --confirm-robot-ip 172.16.90.197
 ```
 
+Slow both systems together by supplying either a duration multiplier or an arm
+speed cap. Never slow only one side of a synchronized pRRTC plan:
+
+```sh
+crazyfly_prrtc_demo /absolute/path/to/execution_bundle \
+  --maximum-arm-speed-rad-s 0.5
+
+crazyfly_prrtc_demo /absolute/path/to/execution_bundle \
+  --playback-timescale 2.0
+```
+
+The current circle-one bundle resolves the 0.5 rad/s cap to a 2.905464x
+duration multiplier: 20.048 s of synchronized main motion, 22.227 s through
+the drone braking endpoint, and an 11.622 s arm park. Only timescales at least
+1.0 are allowed; this interface cannot speed a validated plan up.
+
 The UR trajectory validator uses the lab-wide limits `pi rad/s` and
 `40 rad/s^2`; the RTDE executor uses `servoJ` at 100 Hz with lookahead 0.03 s
 and gain 1000. The physical UR5e installation adds `+pi/2` to the first

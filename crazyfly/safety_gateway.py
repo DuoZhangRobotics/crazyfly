@@ -603,8 +603,10 @@ class SafetyGateway(Node):
                 or not 0 <= trajectory_id <= 255
             ):
                 raise ValueError("trajectory_id must be an integer from 0 to 255")
-            if not isfinite(timescale) or abs(timescale - 1.0) > 1e-7:
-                raise ValueError("trajectory timescale must be exactly 1.0")
+            if not isfinite(timescale) or timescale < 1.0:
+                raise ValueError(
+                    "trajectory timescale must be finite and at least 1.0"
+                )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             self._reject_trajectory("trajectory_start", mission_id, str(exc))
             return
@@ -625,6 +627,14 @@ class SafetyGateway(Node):
         if self._trajectory_started:
             self._reject_trajectory(
                 "trajectory_start", mission_id, "trajectory was already started"
+            )
+            return
+        scaled_duration = prepared.plan.duration_s * timescale
+        if scaled_duration > self.safety.maximum_trajectory_duration_s:
+            self._reject_trajectory(
+                "trajectory_start",
+                mission_id,
+                "scaled trajectory duration exceeds the configured limit",
             )
             return
         if self._batch_end_at is not None and self._now() < self._batch_end_at:
@@ -666,12 +676,12 @@ class SafetyGateway(Node):
         request = StartTrajectory.Request()
         request.group_mask = 0
         request.trajectory_id = trajectory_id
-        request.timescale = 1.0
+        request.timescale = timescale
         request.reversed = False
         request.relative = False
         self.start_trajectory_client.call_async(request)
         self._trajectory_started = True
-        self._trajectory_end_at = self._now() + prepared.plan.duration_s
+        self._trajectory_end_at = self._now() + scaled_duration
         self._publish_command(
             "trajectory_start",
             "accepted",
@@ -679,7 +689,9 @@ class SafetyGateway(Node):
                 {
                     "mission_id": mission_id,
                     "trajectory_id": trajectory_id,
-                    "duration_s": prepared.plan.duration_s,
+                    "duration_s": scaled_duration,
+                    "source_duration_s": prepared.plan.duration_s,
+                    "timescale": timescale,
                 },
                 separators=(",", ":"),
             ),

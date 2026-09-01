@@ -234,6 +234,34 @@ def offset_first_joint(
     )
 
 
+def maximum_joint_speed(trajectory: JointTrajectory) -> float:
+    """Return the maximum absolute piecewise-linear joint speed."""
+    return max(
+        abs(end - start) / (second.time_s - first.time_s)
+        for first, second in zip(trajectory.samples, trajectory.samples[1:])
+        for start, end in zip(first.positions_rad, second.positions_rad)
+    )
+
+
+def scale_trajectory_time(
+    trajectory: JointTrajectory,
+    timescale: float,
+) -> JointTrajectory:
+    """Slow a joint trajectory by multiplying every timestamp."""
+    if not isfinite(timescale) or timescale < 1.0:
+        raise ConfigError("trajectory timescale must be finite and at least 1.0")
+    return JointTrajectory(
+        name=trajectory.name,
+        samples=tuple(
+            JointSample(
+                time_s=sample.time_s * timescale,
+                positions_rad=sample.positions_rad,
+            )
+            for sample in trajectory.samples
+        ),
+    )
+
+
 def _require_collision_validation(validation: Mapping[str, object], key: str) -> None:
     item = validation.get(key)
     if not isinstance(item, Mapping) or item.get("collision_free") is not True:
