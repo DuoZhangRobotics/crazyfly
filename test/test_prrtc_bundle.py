@@ -244,6 +244,7 @@ def test_prrtc_v2_bundle_normalizes_names_and_absolute_park_time(
     root = write_bundle(tmp_path / "bundle")
     park_path = root / "ur5e_park_trajectory.json"
     park = json.loads(park_path.read_text())
+    park["schema_version"] = 2
     park.pop("frame")
     for sample in park["samples"]:
         sample["time_s"] += 4.0

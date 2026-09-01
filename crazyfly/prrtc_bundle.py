@@ -147,14 +147,18 @@ def load_joint_trajectory(
     *,
     allow_missing_frame: bool = False,
     normalize_time_origin: bool = False,
+    allow_schema_version_2: bool = False,
 ) -> JointTrajectory:
     payload = _read_object(path)
     frame = payload.get("frame")
+    schema_version = payload.get("schema_version")
     if (
-        payload.get("schema_version") != 1
-        or (frame != "base" and not (allow_missing_frame and frame is None))
-    ):
-        raise ConfigError(f"{name} must use schema version 1 in base")
+        schema_version != 1
+        and not (allow_schema_version_2 and schema_version == 2)
+    ) or (frame != "base" and not (allow_missing_frame and frame is None)):
+        raise ConfigError(
+            f"{name} must use an accepted schema version in base"
+        )
     if tuple(payload.get("joint_names", ())) != JOINT_NAMES:
         raise ConfigError(f"{name} has unexpected UR5e joint names")
     raw_samples = payload.get("samples")
@@ -399,6 +403,7 @@ def load_execution_bundle(
         "ur5e park",
         allow_missing_frame=schema_version == 2,
         normalize_time_origin=schema_version == 2,
+        allow_schema_version_2=schema_version == 2,
     )
     validate_joint_limits(
         main,
