@@ -9,6 +9,10 @@ crazyfly_safety:
   tracking:
     expected_raw_marker_count:
     marker_count_grace_s: 0.050
+    marker_filter:
+      mode: exact_count
+      association_radius_m: 0.08
+      maximum_distant_markers: 0
     pose_identity_emergency_s:
     maximum_pose_speed_m_s:
     pose_speed_window_s: 0.050

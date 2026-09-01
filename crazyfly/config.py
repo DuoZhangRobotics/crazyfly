@@ -60,6 +60,9 @@ class SafetyConfig:
     recovery_time_s: float
     expected_raw_marker_count: int | None
     marker_count_grace_s: float
+    marker_filter_mode: str
+    marker_association_radius_m: float
+    maximum_distant_markers: int | None
     maximum_pose_speed_m_s: float | None
     pose_speed_window_s: float
     pose_speed_action: str
@@ -239,6 +242,36 @@ def load_safety(path: str | Path) -> SafetyConfig:
         )
     else:
         expected_raw_marker_count = expected_marker_count
+    marker_filter = tracking.get("marker_filter", {})
+    if not isinstance(marker_filter, Mapping):
+        raise ConfigError("tracking.marker_filter must be a mapping")
+    marker_filter_mode = marker_filter.get("mode", "exact_count")
+    if marker_filter_mode not in {"exact_count", "pose_proximity"}:
+        raise ConfigError(
+            "tracking.marker_filter.mode must be exact_count or pose_proximity"
+        )
+    marker_association_radius_m = _finite_number(
+        marker_filter.get("association_radius_m", 0.08),
+        "tracking.marker_filter.association_radius_m",
+    )
+    maximum_distant_value = marker_filter.get("maximum_distant_markers", 0)
+    if maximum_distant_value is None:
+        maximum_distant_markers = None
+    elif (
+        isinstance(maximum_distant_value, bool)
+        or not isinstance(maximum_distant_value, int)
+        or maximum_distant_value < 0
+    ):
+        raise ConfigError(
+            "tracking.marker_filter.maximum_distant_markers must be a "
+            "non-negative integer or null"
+        )
+    else:
+        maximum_distant_markers = maximum_distant_value
+    if marker_filter_mode == "pose_proximity" and expected_raw_marker_count is None:
+        raise ConfigError(
+            "pose_proximity marker filtering requires expected_raw_marker_count"
+        )
     maximum_pose_speed = tracking.get("maximum_pose_speed_m_s")
     maximum_pose_speed_m_s = (
         None
@@ -305,6 +338,9 @@ def load_safety(path: str | Path) -> SafetyConfig:
             tracking.get("marker_count_grace_s", 0.050),
             "tracking.marker_count_grace_s",
         ),
+        marker_filter_mode=marker_filter_mode,
+        marker_association_radius_m=marker_association_radius_m,
+        maximum_distant_markers=maximum_distant_markers,
         maximum_pose_speed_m_s=maximum_pose_speed_m_s,
         pose_speed_window_s=_finite_number(
             tracking.get("pose_speed_window_s", 0.050),
@@ -407,6 +443,10 @@ def load_safety(path: str | Path) -> SafetyConfig:
         and config.maximum_pose_speed_m_s <= 0
     ):
         raise ConfigError("tracking.maximum_pose_speed_m_s must be positive")
+    if config.marker_association_radius_m <= 0:
+        raise ConfigError(
+            "tracking.marker_filter.association_radius_m must be positive"
+        )
     if config.soft_geofence_margin_m < 0:
         raise ConfigError("soft geofence margin must be non-negative")
     if config.flight_enabled and not config.has_geofence:

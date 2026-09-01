@@ -75,7 +75,24 @@ def test_expected_marker_count_omits_redundant_positions() -> None:
         "source_frame": "world",
         "frame": "base",
         "count": 4,
+        "filter_mode": "exact_count",
+        "association_radius_m": 0.08,
     }
+
+
+def test_proximity_mode_records_positions_even_at_expected_count() -> None:
+    message = point_cloud2.create_cloud_xyz32(
+        Header(frame_id="world"),
+        [(0.0, 0.0, 0.0)] * 4,
+    )
+    safety = replace(_base_safety(), marker_filter_mode="pose_proximity")
+
+    data = raw_marker_event_data(message, safety)
+
+    assert data["filter_mode"] == "pose_proximity"
+    assert data["association_radius_m"] == pytest.approx(0.08)
+    assert data["valid_position_count"] == 4
+    assert len(data["positions"]) == 4
 
 
 def test_trajectory_source_is_copied_byte_for_byte(tmp_path: Path) -> None:

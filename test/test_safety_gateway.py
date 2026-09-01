@@ -1,8 +1,11 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
 
 from crazyfly.config import load_safety
 from crazyfly.safety import Evaluation, SafetyAction, SafetyState
@@ -63,6 +66,55 @@ def test_pose_callback_uses_message_stamp_for_speed_and_receipt_for_age() -> Non
     gateway._pose_callback(message)
 
     assert calls == [("cf1", (1.0, 2.0, 3.0), 10.0, 123.5)]
+
+
+def test_point_cloud_callback_decodes_positions_for_proximity_filter() -> None:
+    gateway = object.__new__(SafetyGateway)
+    gateway.safety = replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        marker_filter_mode="pose_proximity",
+    )
+    calls = []
+    gateway.machine = SimpleNamespace(
+        record_raw_markers=lambda *arguments: calls.append(arguments)
+    )
+    gateway._pose_frame_id = "world"
+    gateway._now = lambda: 10.0
+    gateway._publish_marker_filter_transition = lambda: None
+    message = point_cloud2.create_cloud_xyz32(
+        Header(frame_id="world"), [(0.0, 0.0, 0.3), (0.3, 0.0, 0.3)]
+    )
+
+    gateway._point_cloud_callback(message)
+
+    assert calls[0][1] == 10.0
+    for actual, expected in zip(
+        calls[0][0], [(0.0, 0.0, 0.3), (0.3, 0.0, 0.3)]
+    ):
+        assert actual == pytest.approx(expected)
+
+
+def test_point_cloud_frame_mismatch_records_marker_error() -> None:
+    gateway = object.__new__(SafetyGateway)
+    gateway.safety = replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        marker_filter_mode="pose_proximity",
+    )
+    errors = []
+    gateway.machine = SimpleNamespace(
+        record_raw_marker_error=lambda *arguments: errors.append(arguments)
+    )
+    gateway._pose_frame_id = "world"
+    gateway._now = lambda: 10.0
+    gateway._publish_marker_filter_transition = lambda: None
+    message = point_cloud2.create_cloud_xyz32(
+        Header(frame_id="camera"), [(0.0, 0.0, 0.3)]
+    )
+
+    gateway._point_cloud_callback(message)
+
+    assert errors[0][:2] == (1, 10.0)
+    assert "does not match" in errors[0][2]
 
 
 def test_land_is_rejected_after_gateway_disables() -> None:

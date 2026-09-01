@@ -23,6 +23,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
 from std_srvs.srv import Empty, SetBool
 
 from .config import load_fleet
@@ -127,10 +128,10 @@ class MockStack(Node):
             onboard.pose = pose.pose
             self.onboard_pose_publishers[name].publish(onboard)
         self.pose_publisher.publish(message)
-        point_cloud = PointCloud2()
-        point_cloud.header = message.header
-        point_cloud.height = 1
-        point_cloud.width = len(self.robots)
+        point_cloud = point_cloud2.create_cloud_xyz32(
+            message.header,
+            [robot.position for robot in self.robots.values()],
+        )
         self.point_cloud_publisher.publish(point_cloud)
 
     def _publish_status(self) -> None:

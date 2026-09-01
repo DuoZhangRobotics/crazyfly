@@ -207,6 +207,34 @@ def test_invalid_raw_marker_count_is_rejected(tmp_path: Path) -> None:
         load_safety(path)
 
 
+def test_pose_proximity_filter_requires_count_and_valid_limits(tmp_path: Path) -> None:
+    source = _mock_safety_source()
+    tracking = source["crazyfly_safety"]["tracking"]
+    tracking["marker_filter"] = {
+        "mode": "pose_proximity",
+        "association_radius_m": 0.08,
+        "maximum_distant_markers": None,
+    }
+    tracking["expected_raw_marker_count"] = None
+    path = tmp_path / "missing_expected.yaml"
+    path.write_text(yaml.safe_dump(source))
+
+    with pytest.raises(ConfigError, match="requires expected_raw_marker_count"):
+        load_safety(path)
+
+    tracking["expected_raw_marker_count"] = 3
+    tracking["marker_filter"]["association_radius_m"] = 0.0
+    path.write_text(yaml.safe_dump(source))
+    with pytest.raises(ConfigError, match="association_radius_m must be positive"):
+        load_safety(path)
+
+    tracking["marker_filter"]["association_radius_m"] = 0.08
+    tracking["marker_filter"]["maximum_distant_markers"] = -1
+    path.write_text(yaml.safe_dump(source))
+    with pytest.raises(ConfigError, match="non-negative integer or null"):
+        load_safety(path)
+
+
 def test_identity_timeout_cannot_precede_pose_rejection(tmp_path: Path) -> None:
     source = _mock_safety_source()
     source["crazyfly_safety"]["tracking"]["pose_identity_emergency_s"] = 0.05

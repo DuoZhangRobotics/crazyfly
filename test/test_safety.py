@@ -13,7 +13,9 @@ from crazyfly.safety import (
     SafetyAction,
     SafetyMachine,
     SafetyState,
+    classify_pose_proximity_markers,
     continuous_minimum_separation,
+    marker_filter_fault_reason,
 )
 
 
@@ -111,6 +113,155 @@ def test_persistent_raw_marker_loss_emergency_stops_before_reassignment() -> Non
     assert transient.reasons == ()
     assert persistent.action is SafetyAction.EMERGENCY
     assert persistent.reasons == ("raw marker count mismatch: expected 2, got 1",)
+
+
+@pytest.mark.parametrize(
+    ("tracked", "markers"),
+    [
+        (
+            {
+                "cf1": (0.0242, -0.6807, 0.1933),
+                "cf2": (0.3086, -0.5658, 0.3519),
+                "cf3": (-0.2296, -0.9282, 0.7383),
+            },
+            [
+                (0.0064, -0.6856, 0.1779),
+                (-0.2473, -0.9331, 0.7229),
+                (0.2908, -0.5708, 0.3365),
+                (-0.4561, -0.4533, 0.3495),
+                (-0.4481, -0.4687, 0.3529),
+            ],
+        ),
+        (
+            {
+                "cf1": (0.0293, -0.6883, 0.2052),
+                "cf2": (0.3009, -0.5604, 0.3435),
+                "cf3": (-0.2374, -0.9239, 0.7194),
+            },
+            [
+                (0.0293, -0.6883, 0.2052),
+                (-0.2374, -0.9239, 0.7194),
+                (0.3009, -0.5604, 0.3435),
+                (-0.4631, -0.4553, 0.3640),
+                (-0.4538, -0.4703, 0.3651),
+            ],
+        ),
+    ],
+)
+def test_failed_run_replay_classifies_gripper_ghosts_as_distant(
+    tracked, markers
+) -> None:
+    result = classify_pose_proximity_markers(markers, tracked, 0.08)
+
+    assert result.matched_names == ("cf1", "cf2", "cf3")
+    assert result.missing_names == ()
+    assert result.nearby_duplicate_positions == ()
+    assert len(result.distant_extra_positions) == 2
+    assert marker_filter_fault_reason(result, None) is None
+
+
+def test_marker_assignment_is_unique_and_minimum_cost() -> None:
+    result = classify_pose_proximity_markers(
+        [(0.04, 0.0, 0.3), (0.06, 0.0, 0.3)],
+        {"cf1": (0.0, 0.0, 0.3), "cf2": (0.10, 0.0, 0.3)},
+        0.08,
+    )
+
+    assert dict(result.matched_distances_m) == pytest.approx(
+        {"cf1": 0.04, "cf2": 0.04}
+    )
+    assert result.missing_names == ()
+
+
+def test_nearby_duplicate_is_not_ignored_as_a_distant_reflection() -> None:
+    result = classify_pose_proximity_markers(
+        [(0.02, 0.0, 0.3), (0.03, 0.0, 0.3)],
+        {"cf1": (0.0, 0.0, 0.3)},
+        0.08,
+    )
+
+    assert len(result.nearby_duplicate_positions) == 1
+    assert marker_filter_fault_reason(result, None) == "raw marker nearby duplicates: 1"
+
+
+def _ready_proximity_machine() -> SafetyMachine:
+    names = ("cf1", "cf2")
+    config = replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        expected_raw_marker_count=2,
+        marker_filter_mode="pose_proximity",
+        marker_association_radius_m=0.08,
+        maximum_distant_markers=None,
+        marker_count_grace_s=0.05,
+    )
+    machine = SafetyMachine(config, names)
+    positions = {"cf1": (0.0, 0.0, 0.3), "cf2": (0.5, 0.0, 0.3)}
+    _record_healthy(machine, 0.0, positions)
+    machine.record_raw_markers(list(positions.values()), 0.0)
+    machine.evaluate(0.0)
+    _record_healthy(machine, 1.01, positions)
+    machine.record_raw_markers(list(positions.values()), 1.01)
+    machine.evaluate(1.01)
+    success, reasons = machine.enable(1.01)
+    assert success, reasons
+    machine.mark_flying()
+    return machine
+
+
+def test_distant_reflections_are_ignored_only_after_strict_preflight() -> None:
+    machine = _ready_proximity_machine()
+    machine.record_raw_markers(
+        [(0.0, 0.0, 0.3), (0.5, 0.0, 0.3), (-0.45, -0.46, 0.35)],
+        1.02,
+    )
+
+    result = machine.evaluate(1.10)
+
+    assert result.action is SafetyAction.NONE
+    assert result.commands_allowed
+    machine.disable()
+    success, reasons = machine.preflight(1.10)
+    assert not success
+    assert "raw marker count mismatch: expected 2, got 3" in reasons
+
+
+def test_persistent_proximity_marker_loss_emergency_stops() -> None:
+    machine = _ready_proximity_machine()
+    machine.record_raw_markers([(0.0, 0.0, 0.3)], 1.02)
+
+    transient = machine.evaluate(1.04)
+    persistent = machine.evaluate(1.08)
+
+    assert transient.action is SafetyAction.NONE
+    assert persistent.action is SafetyAction.EMERGENCY
+    assert persistent.reasons == ("raw marker association missing: cf2",)
+
+
+def test_persistent_nearby_duplicate_emergency_stops() -> None:
+    machine = _ready_proximity_machine()
+    machine.record_raw_markers(
+        [(0.0, 0.0, 0.3), (0.02, 0.0, 0.3), (0.5, 0.0, 0.3)],
+        1.02,
+    )
+
+    transient = machine.evaluate(1.04)
+    persistent = machine.evaluate(1.08)
+
+    assert transient.action is SafetyAction.NONE
+    assert persistent.action is SafetyAction.EMERGENCY
+    assert persistent.reasons == ("raw marker nearby duplicates: 1",)
+
+
+def test_non_finite_marker_is_a_filtered_data_fault() -> None:
+    result = classify_pose_proximity_markers(
+        [(float("nan"), 0.0, 0.3)],
+        {"cf1": (0.0, 0.0, 0.3)},
+        0.08,
+    )
+
+    assert marker_filter_fault_reason(result, None) == (
+        "raw marker data invalid: non-finite or malformed marker position"
+    )
 
 
 def test_identity_timeout_emergency_stops_instead_of_position_controlled_land() -> None:

@@ -27,6 +27,7 @@ from motion_capture_tracking_interfaces.msg import NamedPoseArray
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
 from std_msgs.msg import String
 from std_srvs.srv import Empty, SetBool, Trigger
 
@@ -102,6 +103,8 @@ class SafetyGateway(Node):
         self._trajectory_end_at: float | None = None
         self._trajectory_started = False
         self._last_rejection = ""
+        self._pose_frame_id: str | None = None
+        self._marker_filter_signature: tuple[object, ...] | None = None
 
         self.state_publisher = self.create_publisher(
             String, "/crazyfly/safety/state", 10
@@ -200,6 +203,7 @@ class SafetyGateway(Node):
 
     def _pose_callback(self, message: NamedPoseArray) -> None:
         received_at = self._now()
+        self._pose_frame_id = getattr(message.header, "frame_id", "") or None
         stamp = message.header.stamp
         sample_time = float(stamp.sec) + float(stamp.nanosec) * 1e-9
         if sample_time <= 0:
@@ -214,7 +218,91 @@ class SafetyGateway(Node):
             )
 
     def _point_cloud_callback(self, message: PointCloud2) -> None:
-        self.machine.record_raw_marker_count(message.width * message.height, self._now())
+        received_at = self._now()
+        count = message.width * message.height
+        if self.safety.marker_filter_mode == "exact_count":
+            self.machine.record_raw_marker_count(count, received_at)
+            return
+        if self._pose_frame_id is None:
+            self.machine.record_raw_marker_error(
+                count, received_at, "pose frame is unavailable"
+            )
+            self._publish_marker_filter_transition()
+            return
+        if message.header.frame_id != self._pose_frame_id:
+            self.machine.record_raw_marker_error(
+                count,
+                received_at,
+                "point-cloud frame does not match pose frame: "
+                f"{message.header.frame_id!r} != {self._pose_frame_id!r}",
+            )
+            self._publish_marker_filter_transition()
+            return
+        try:
+            points = point_cloud2.read_points_list(
+                message,
+                field_names=["x", "y", "z"],
+                skip_nans=False,
+            )
+            positions = [
+                (float(point.x), float(point.y), float(point.z))
+                for point in points
+            ]
+            if len(positions) != count:
+                raise ValueError(
+                    f"decoded {len(positions)} points but message declares {count}"
+                )
+            if any(
+                not all(isfinite(value) for value in position)
+                for position in positions
+            ):
+                raise ValueError("point cloud contains non-finite marker coordinates")
+        except (AssertionError, KeyError, TypeError, ValueError) as exc:
+            self.machine.record_raw_marker_error(count, received_at, str(exc))
+        else:
+            self.machine.record_raw_markers(positions, received_at)
+        self._publish_marker_filter_transition()
+
+    def _publish_marker_filter_transition(self) -> None:
+        result = self.machine.raw_marker_filter_result
+        if result is None:
+            return
+        signature = (
+            self.machine.raw_marker_fault_reason,
+            result.matched_names,
+            result.missing_names,
+            len(result.nearby_duplicate_positions),
+            len(result.distant_extra_positions),
+        )
+        if signature == self._marker_filter_signature:
+            return
+        self._marker_filter_signature = signature
+        details = json.dumps(
+            {
+                "mode": self.safety.marker_filter_mode,
+                "association_radius_m": self.safety.marker_association_radius_m,
+                "total_count": result.total_count,
+                "matched": {
+                    name: distance_m
+                    for name, distance_m in result.matched_distances_m
+                },
+                "missing": list(result.missing_names),
+                "nearby_duplicates": [
+                    list(position)
+                    for position in result.nearby_duplicate_positions
+                ],
+                "distant_extras": [
+                    list(position) for position in result.distant_extra_positions
+                ],
+                "fault": self.machine.raw_marker_fault_reason,
+            },
+            separators=(",", ":"),
+        )
+        self._publish_command(
+            "marker_filter",
+            "rejected" if self.machine.raw_marker_fault_reason else "accepted",
+            details=details,
+        )
 
     def _status_callback(self, name: str, message: Status) -> None:
         self.machine.record_status(
@@ -850,7 +938,42 @@ class SafetyGateway(Node):
             ),
             KeyValue(key="reasons", value=json.dumps(self.last_evaluation.reasons)),
             KeyValue(key="last_rejection", value=self._last_rejection),
+            KeyValue(key="marker_filter_mode", value=self.safety.marker_filter_mode),
+            KeyValue(
+                key="marker_association_radius_m",
+                value=str(self.safety.marker_association_radius_m),
+            ),
+            KeyValue(
+                key="raw_marker_total",
+                value=str(self.machine.raw_marker_count),
+            ),
         ]
+        marker_result = self.machine.raw_marker_filter_result
+        if marker_result is not None:
+            diagnostic.values.extend(
+                [
+                    KeyValue(
+                        key="raw_marker_matched",
+                        value=json.dumps(marker_result.matched_names),
+                    ),
+                    KeyValue(
+                        key="raw_marker_missing",
+                        value=json.dumps(marker_result.missing_names),
+                    ),
+                    KeyValue(
+                        key="raw_marker_nearby_duplicates",
+                        value=str(len(marker_result.nearby_duplicate_positions)),
+                    ),
+                    KeyValue(
+                        key="raw_marker_distant_extras",
+                        value=str(len(marker_result.distant_extra_positions)),
+                    ),
+                    KeyValue(
+                        key="raw_marker_fault",
+                        value=str(self.machine.raw_marker_fault_reason),
+                    ),
+                ]
+            )
         array = DiagnosticArray()
         array.header.stamp = self.get_clock().now().to_msg()
         array.status = [diagnostic]

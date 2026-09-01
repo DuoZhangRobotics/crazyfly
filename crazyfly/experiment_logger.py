@@ -132,9 +132,14 @@ def raw_marker_event_data(message: PointCloud2, safety) -> dict[str, object]:
         "source_frame": message.header.frame_id,
         "frame": safety.geofence_frame,
         "count": count,
+        "filter_mode": safety.marker_filter_mode,
+        "association_radius_m": safety.marker_association_radius_m,
     }
     expected = safety.expected_raw_marker_count
-    if expected is not None and count != expected:
+    if (
+        safety.marker_filter_mode == "pose_proximity"
+        or (expected is not None and count != expected)
+    ):
         markers = point_cloud2.read_points_list(
             message,
             field_names=["x", "y", "z"],

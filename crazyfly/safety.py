@@ -61,6 +61,172 @@ class Evaluation:
     commands_allowed: bool
 
 
+@dataclass(frozen=True)
+class MarkerFilterResult:
+    total_count: int
+    matched_distances_m: tuple[tuple[str, float], ...]
+    missing_names: tuple[str, ...]
+    nearby_duplicate_positions: tuple[tuple[float, float, float], ...]
+    distant_extra_positions: tuple[tuple[float, float, float], ...]
+    malformed_reason: str | None = None
+
+    @property
+    def matched_names(self) -> tuple[str, ...]:
+        return tuple(name for name, _distance in self.matched_distances_m)
+
+
+def classify_pose_proximity_markers(
+    marker_positions: Sequence[Sequence[float]],
+    tracked_positions: Mapping[str, Sequence[float] | None],
+    association_radius_m: float,
+) -> MarkerFilterResult:
+    """Assign distinct raw markers to named poses and classify all leftovers."""
+    names = tuple(sorted(tracked_positions))
+    try:
+        markers = tuple(
+            tuple(float(value) for value in position)
+            for position in marker_positions
+        )
+    except (TypeError, ValueError) as exc:
+        return MarkerFilterResult(
+            len(marker_positions), (), names, (), (), f"invalid marker position: {exc}"
+        )
+    if association_radius_m <= 0 or not isfinite(association_radius_m):
+        return MarkerFilterResult(
+            len(markers), (), names, (), (), "invalid association radius"
+        )
+    if any(
+        len(position) != 3 or not all(isfinite(value) for value in position)
+        for position in markers
+    ):
+        return MarkerFilterResult(
+            len(markers), (), names, (), (), "non-finite or malformed marker position"
+        )
+
+    available: dict[str, tuple[float, float, float]] = {}
+    unavailable = []
+    for name in names:
+        raw = tracked_positions[name]
+        if raw is None:
+            unavailable.append(name)
+            continue
+        try:
+            position = tuple(float(value) for value in raw)
+        except (TypeError, ValueError):
+            unavailable.append(name)
+            continue
+        if len(position) != 3 or not all(isfinite(value) for value in position):
+            unavailable.append(name)
+            continue
+        available[name] = position  # type: ignore[assignment]
+
+    candidates = {
+        name: tuple(
+            sorted(
+                (
+                    (index, dist(position, marker))
+                    for index, marker in enumerate(markers)
+                    if dist(position, marker) <= association_radius_m
+                ),
+                key=lambda item: (item[1], item[0]),
+            )[: len(names) + 1]
+        )
+        for name, position in available.items()
+    }
+    available_names = tuple(sorted(available))
+    best_key: tuple[object, ...] | None = None
+    best_assignment: tuple[int | None, ...] = ()
+
+    def search(
+        name_index: int,
+        used: frozenset[int],
+        assignment: tuple[int | None, ...],
+        matched_count: int,
+        total_cost: float,
+    ) -> None:
+        nonlocal best_key, best_assignment
+        if name_index == len(available_names):
+            tie = tuple(
+                len(markers) + index if value is None else value
+                for index, value in enumerate(assignment)
+            )
+            key: tuple[object, ...] = (-matched_count, total_cost, tie)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_assignment = assignment
+            return
+        name = available_names[name_index]
+        for marker_index, distance_m in candidates[name]:
+            if marker_index not in used:
+                search(
+                    name_index + 1,
+                    used | {marker_index},
+                    (*assignment, marker_index),
+                    matched_count + 1,
+                    total_cost + distance_m * distance_m,
+                )
+        search(
+            name_index + 1,
+            used,
+            (*assignment, None),
+            matched_count,
+            total_cost,
+        )
+
+    search(0, frozenset(), (), 0, 0.0)
+    matched = []
+    matched_indices = set()
+    missing = list(unavailable)
+    for name, marker_index in zip(available_names, best_assignment):
+        if marker_index is None:
+            missing.append(name)
+            continue
+        matched_indices.add(marker_index)
+        matched.append((name, dist(available[name], markers[marker_index])))
+
+    nearby = []
+    distant = []
+    tracked = tuple(available.values())
+    for index, marker in enumerate(markers):
+        if index in matched_indices:
+            continue
+        if tracked and min(dist(marker, position) for position in tracked) <= association_radius_m:
+            nearby.append(marker)
+        else:
+            distant.append(marker)
+    return MarkerFilterResult(
+        total_count=len(markers),
+        matched_distances_m=tuple(sorted(matched)),
+        missing_names=tuple(sorted(missing)),
+        nearby_duplicate_positions=tuple(nearby),
+        distant_extra_positions=tuple(distant),
+    )
+
+
+def marker_filter_fault_reason(
+    result: MarkerFilterResult,
+    maximum_distant_markers: int | None,
+) -> str | None:
+    if result.malformed_reason:
+        return f"raw marker data invalid: {result.malformed_reason}"
+    if result.missing_names:
+        return "raw marker association missing: " + ", ".join(result.missing_names)
+    if result.nearby_duplicate_positions:
+        return (
+            "raw marker nearby duplicates: "
+            f"{len(result.nearby_duplicate_positions)}"
+        )
+    if (
+        maximum_distant_markers is not None
+        and len(result.distant_extra_positions) > maximum_distant_markers
+    ):
+        return (
+            "raw marker distant extras exceed limit: "
+            f"{len(result.distant_extra_positions)} > {maximum_distant_markers}"
+        )
+    return None
+
+
 @dataclass
 class SafetyMachine:
     config: SafetyConfig
@@ -72,6 +238,8 @@ class SafetyMachine:
     raw_marker_count: int | None = None
     raw_marker_count_received_at: float | None = None
     raw_marker_fault_since: float | None = None
+    raw_marker_fault_reason: str | None = None
+    raw_marker_filter_result: MarkerFilterResult | None = None
     _land_requested: bool = False
     _takeoff_requested: set[str] = field(default_factory=set)
 
@@ -116,8 +284,71 @@ class SafetyMachine:
     def record_raw_marker_count(self, count: int, received_at: float) -> None:
         self.raw_marker_count = int(count)
         self.raw_marker_count_received_at = received_at
+        self.raw_marker_filter_result = None
         expected = self.config.expected_raw_marker_count
-        if expected is None or self.raw_marker_count == expected:
+        reason = None
+        if expected is not None and self.raw_marker_count != expected:
+            reason = (
+                "raw marker count mismatch: "
+                f"expected {expected}, got {self.raw_marker_count}"
+            )
+        self._record_raw_marker_fault(reason, received_at)
+
+    def record_raw_markers(
+        self,
+        marker_positions: Sequence[Sequence[float]],
+        received_at: float,
+        malformed_reason: str | None = None,
+    ) -> None:
+        tracked = {name: item.position for name, item in self.health.items()}
+        result = classify_pose_proximity_markers(
+            marker_positions,
+            tracked,
+            self.config.marker_association_radius_m,
+        )
+        if malformed_reason is not None:
+            result = MarkerFilterResult(
+                total_count=len(marker_positions),
+                matched_distances_m=result.matched_distances_m,
+                missing_names=result.missing_names,
+                nearby_duplicate_positions=result.nearby_duplicate_positions,
+                distant_extra_positions=result.distant_extra_positions,
+                malformed_reason=malformed_reason,
+            )
+        self.raw_marker_count = result.total_count
+        self.raw_marker_count_received_at = received_at
+        self.raw_marker_filter_result = result
+        reason = marker_filter_fault_reason(
+            result, self.config.maximum_distant_markers
+        )
+        self._record_raw_marker_fault(reason, received_at)
+
+    def record_raw_marker_error(
+        self, count: int, received_at: float, reason: str
+    ) -> None:
+        result = MarkerFilterResult(
+            total_count=int(count),
+            matched_distances_m=(),
+            missing_names=self.robot_names,
+            nearby_duplicate_positions=(),
+            distant_extra_positions=(),
+            malformed_reason=reason,
+        )
+        self.raw_marker_count = result.total_count
+        self.raw_marker_count_received_at = received_at
+        self.raw_marker_filter_result = result
+        self._record_raw_marker_fault(
+            marker_filter_fault_reason(
+                result, self.config.maximum_distant_markers
+            ),
+            received_at,
+        )
+
+    def _record_raw_marker_fault(
+        self, reason: str | None, received_at: float
+    ) -> None:
+        self.raw_marker_fault_reason = reason
+        if reason is None:
             self.raw_marker_fault_since = None
         elif self.raw_marker_fault_since is None:
             self.raw_marker_fault_since = received_at
@@ -249,7 +480,7 @@ class SafetyMachine:
                     (
                         "missing raw marker",
                         "stale raw marker",
-                        "raw marker count",
+                        "raw marker",
                     )
                 )
             ]
@@ -532,7 +763,7 @@ class SafetyMachine:
             return float("inf")
         if now - received_at >= self.config.pose_reject_age_s:
             return now - received_at - self.config.pose_reject_age_s
-        if self.raw_marker_count != self.config.expected_raw_marker_count:
+        if self.raw_marker_fault_reason is not None:
             if self.raw_marker_fault_since is None:
                 return 0.0
             return now - self.raw_marker_fault_since
@@ -547,18 +778,25 @@ class SafetyMachine:
                 reasons.append("missing raw marker count")
             elif now - self.raw_marker_count_received_at >= self.config.pose_reject_age_s:
                 reasons.append("stale raw marker count")
-            elif (
-                self.raw_marker_count != expected_markers
-                and (
-                    preflight
-                    or self._raw_marker_fault_duration(now)
-                    >= self.config.marker_count_grace_s
-                )
-            ):
+            elif preflight and self.raw_marker_count != expected_markers:
                 reasons.append(
                     "raw marker count mismatch: "
                     f"expected {expected_markers}, got {self.raw_marker_count}"
                 )
+            elif preflight and self.config.marker_filter_mode == "pose_proximity":
+                result = self.raw_marker_filter_result
+                if result is None:
+                    reasons.append("raw marker spatial classification is unavailable")
+                else:
+                    strict_reason = marker_filter_fault_reason(result, 0)
+                    if strict_reason is not None:
+                        reasons.append(strict_reason)
+            elif (
+                self.raw_marker_fault_reason is not None
+                and self._raw_marker_fault_duration(now)
+                >= self.config.marker_count_grace_s
+            ):
+                reasons.append(self.raw_marker_fault_reason)
         for name, item in self.health.items():
             if item.pose_received_at is None:
                 reasons.append(f"missing pose for {name}")
