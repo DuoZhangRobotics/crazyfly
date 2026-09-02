@@ -49,7 +49,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--first-joint-offset-rad", type=float, default=math.pi / 2.0)
     parser.add_argument("--speed-rad-s", type=float, default=0.15)
     parser.add_argument("--acceleration-rad-s2", type=float, default=0.15)
-    parser.add_argument("--minimum-tcp-z-m", type=float, default=0.05)
     return parser
 
 
@@ -62,14 +61,11 @@ def main(argv: list[str] | None = None) -> int:
             (args.first_joint_offset_rad, "first-joint offset"),
             (args.speed_rad_s, "speed"),
             (args.acceleration_rad_s2, "acceleration"),
-            (args.minimum_tcp_z_m, "minimum TCP Z"),
         ):
             if not math.isfinite(value):
                 raise ValueError(f"{label} must be finite")
         if args.speed_rad_s <= 0 or args.acceleration_rad_s2 <= 0:
             raise ValueError("speed and acceleration must be positive")
-        if args.minimum_tcp_z_m < 0:
-            raise ValueError("minimum TCP Z must be non-negative")
         home = load_physical_home(
             args.home_config, args.first_joint_offset_rad
         )
@@ -78,10 +74,6 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Motion: {args.speed_rad_s:.3f} rad/s, "
             f"{args.acceleration_rad_s2:.3f} rad/s^2"
-        )
-        print(
-            "Required current TCP clearance: "
-            f"base Z >= {args.minimum_tcp_z_m:.3f} m"
         )
         if not args.execute:
             print("DRY RUN: no RTDE connection or robot command was started")
@@ -101,12 +93,6 @@ def main(argv: list[str] | None = None) -> int:
         if len(tcp) != 6 or not all(math.isfinite(value) for value in tcp):
             raise RuntimeError("UR5e returned an invalid TCP pose")
         print(f"Current TCP: {[round(value, 6) for value in tcp]}")
-        if tcp[2] < args.minimum_tcp_z_m:
-            raise RuntimeError(
-                f"current TCP Z {tcp[2]:.3f} m is below the required "
-                f"{args.minimum_tcp_z_m:.3f} m; jog upward manually before "
-                "using this script"
-            )
 
         control = rtde_control.RTDEControlInterface(args.robot_ip)
         if not control.moveJ(
