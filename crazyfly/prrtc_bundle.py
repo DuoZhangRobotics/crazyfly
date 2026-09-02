@@ -29,6 +29,9 @@ REQUIRED_FILES = (
 )
 MAXIMUM_JOINT_SPEED_RAD_S = pi
 MAXIMUM_JOINT_ACCELERATION_RAD_S2 = 40.0
+MAXIMUM_PREPOSITION_DURATION_S = 15.5
+MAXIMUM_PREPOSITION_SPEED_RAD_S = 0.5
+MAXIMUM_PREPOSITION_ACCELERATION_RAD_S2 = 1.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,7 @@ class ExecutionBundle:
     validation: dict[str, object]
     manifest: dict[str, object]
     robot_names: tuple[str, ...]
+    preposition: JointTrajectory | None = None
 
 
 def validate_physical_metadata(
@@ -148,13 +152,17 @@ def load_joint_trajectory(
     allow_missing_frame: bool = False,
     normalize_time_origin: bool = False,
     allow_schema_version_2: bool = False,
+    allow_schema_version_3: bool = False,
 ) -> JointTrajectory:
     payload = _read_object(path)
     frame = payload.get("frame")
     schema_version = payload.get("schema_version")
     if (
         schema_version != 1
-        and not (allow_schema_version_2 and schema_version == 2)
+        and not (
+            (allow_schema_version_2 and schema_version == 2)
+            or (allow_schema_version_3 and schema_version == 3)
+        )
     ) or (frame != "base" and not (allow_missing_frame and frame is None)):
         raise ConfigError(
             f"{name} must use an accepted schema version in base"
@@ -327,6 +335,9 @@ def _normalize_v2_bundle(
     normalized_validation["abort_land_in_place"] = validation.get(
         "vertical_land_abort_corridors"
     )
+    normalized_validation["arm_preposition"] = validation.get(
+        "preposition_path_with_drones_held_at_start"
+    )
     return normalized, normalized_validation
 
 
@@ -372,6 +383,16 @@ def load_execution_bundle(
         path = directory / filename
         if not isinstance(record, Mapping) or record.get("sha256") != _sha256(path):
             raise ConfigError(f"bundle hash mismatch: {filename}")
+    preposition_path = directory / "ur5e_preposition_trajectory.json"
+    preposition_record = file_records.get("ur5e_preposition_trajectory.json")
+    if preposition_path.is_file() != isinstance(preposition_record, Mapping):
+        raise ConfigError(
+            "bundle must provide both ur5e_preposition_trajectory.json and its hash"
+        )
+    if preposition_path.is_file() and preposition_record.get("sha256") != _sha256(
+        preposition_path
+    ):
+        raise ConfigError("bundle hash mismatch: ur5e_preposition_trajectory.json")
     if require_clean:
         state = manifest.get("pRRTC")
         if not isinstance(state, Mapping) or state.get("dirty") is not False:
@@ -388,6 +409,8 @@ def load_execution_bundle(
         required_validations.extend(("drone_return", "abort_land_in_place"))
     for key in required_validations:
         _require_collision_validation(validation, key)
+    if preposition_path.is_file():
+        _require_collision_validation(validation, "arm_preposition")
 
     drone_payload = _read_object(directory / "crazyfly_trajectory_payload.json")
     if drone_payload.get("frame") != "base":
@@ -398,6 +421,14 @@ def load_execution_bundle(
     robot_names = tuple(sorted(str(name) for name in raw_trajectories))
 
     main = load_joint_trajectory(directory / "ur5e_trajectory.json", "ur5e main")
+    preposition = None
+    if preposition_path.is_file():
+        preposition = load_joint_trajectory(
+            preposition_path,
+            "ur5e preposition",
+            allow_missing_frame=True,
+            allow_schema_version_3=True,
+        )
     park = load_joint_trajectory(
         directory / "ur5e_park_trajectory.json",
         "ur5e park",
@@ -415,6 +446,28 @@ def load_execution_bundle(
         maximum_joint_speed_rad_s,
         maximum_joint_acceleration_rad_s2,
     )
+    if preposition is not None:
+        validate_joint_limits(
+            preposition,
+            MAXIMUM_PREPOSITION_SPEED_RAD_S,
+            MAXIMUM_PREPOSITION_ACCELERATION_RAD_S2,
+        )
+        if preposition.duration_s > MAXIMUM_PREPOSITION_DURATION_S + 1e-7:
+            raise ConfigError("UR5e preposition path exceeds 15.5 second limit")
+        if max(
+            abs(first - second)
+            for first, second in zip(preposition.end, main.start)
+        ) > 1e-5:
+            raise ConfigError(
+                "UR5e preposition path must end at the main-path start"
+            )
+        if max(
+            abs(first - second)
+            for first, second in zip(preposition.start, park.end)
+        ) > 1e-5:
+            raise ConfigError(
+                "UR5e preposition must start at the park-path home"
+            )
     if max(abs(first - second) for first, second in zip(main.end, park.start)) > 1e-5:
         raise ConfigError("UR5e park path must begin at the main-path goal")
     if park.duration_s > maximum_park_duration_s + 1e-7:
@@ -424,6 +477,8 @@ def load_execution_bundle(
         raise ConfigError("UR5e main duration does not match manifest T_goal_s")
     main = offset_first_joint(main, first_joint_offset_rad)
     park = offset_first_joint(park, first_joint_offset_rad)
+    if preposition is not None:
+        preposition = offset_first_joint(preposition, first_joint_offset_rad)
     manifest["physical_first_joint_offset_rad"] = first_joint_offset_rad
     return ExecutionBundle(
         root=directory,
@@ -434,4 +489,5 @@ def load_execution_bundle(
         validation=validation,
         manifest=manifest,
         robot_names=robot_names,
+        preposition=preposition,
     )

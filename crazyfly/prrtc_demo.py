@@ -590,6 +590,11 @@ def resolve_playback_timescale(
     source_maximum = max(
         maximum_joint_speed(bundle.main),
         maximum_joint_speed(bundle.park),
+        *(
+            [maximum_joint_speed(bundle.preposition)]
+            if bundle.preposition is not None
+            else []
+        ),
     )
     return max(1.0, source_maximum / maximum_arm_speed_rad_s)
 
@@ -597,6 +602,8 @@ def resolve_playback_timescale(
 def _print_bundle(bundle: ExecutionBundle, timescale: float = 1.0) -> None:
     print(f"PASS: pRRTC bundle {bundle.bundle_id!r} is valid")
     print(f"  drones:       {', '.join(bundle.robot_names)}")
+    if bundle.preposition is not None:
+        print(f"  preposition:  {bundle.preposition.duration_s:.3f} s")
     print(f"  arm duration: {bundle.main.duration_s:.3f} s")
     print(f"  park duration:{bundle.park.duration_s:.3f} s")
     print(f"  playback scale:{timescale:.6f}x duration")
@@ -615,6 +622,12 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         "playback_timescale": args.playback_timescale,
         "accepted_missing_physical_evidence": True,
         "return_altitudes_m": [0.2, 0.4, 0.6, 0.8, 1.0],
+        "home_first_preposition": bundle.preposition is not None,
+        "preposition_duration_s": (
+            None
+            if bundle.preposition is None
+            else bundle.preposition.duration_s
+        ),
     }
     log._write_manifest()
     process = None
@@ -652,8 +665,6 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         ]
         if args.mock:
             command.append("--mock")
-        process = subprocess.Popen(command, start_new_session=True)
-
         if args.mock:
             receive = MockReceive()
             control = MockControl(receive)
@@ -665,8 +676,41 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
             URExecutionConfig(servo_gain=args.servo_gain),
         )
         executor.validate_robot_ready()
-        executor.preposition(bundle.main.start)
+        executor.preposition(
+            bundle.main.start
+            if bundle.preposition is None
+            else bundle.preposition.start
+        )
+        process = subprocess.Popen(command, start_new_session=True)
         wait_for_mission(mission_node.ready, mission_node, process, 90.0, "ready")
+
+        if bundle.preposition is not None:
+            log.event(
+                "arm_preposition_start",
+                {"duration_s": bundle.preposition.duration_s},
+            )
+
+            def record_preposition_sample(sample: URSample) -> None:
+                log.arm_sample(sample)
+                measured = mission_node.positions()
+                separations = distance_model.separations(
+                    sample.actual_rad, measured
+                )
+                log.hardware_sample(
+                    sample,
+                    drone_plan.start_positions,
+                    measured,
+                    separations,
+                )
+
+            executor.execute(
+                bundle.preposition,
+                time.monotonic() + 0.02,
+                record_preposition_sample,
+                stop_when=mission_node.failed.is_set,
+            )
+            log.event("arm_preposition_complete", {})
+
         start_ns = time.monotonic_ns() + 2_000_000_000
         mission_node.schedule(start_ns)
         wait_for_mission(
@@ -791,6 +835,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         bundle = replace(
             bundle,
+            preposition=(
+                None
+                if bundle.preposition is None
+                else scale_trajectory_time(
+                    bundle.preposition, args.playback_timescale
+                )
+            ),
             main=scale_trajectory_time(bundle.main, args.playback_timescale),
             park=scale_trajectory_time(bundle.park, args.playback_timescale),
         )

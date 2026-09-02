@@ -93,16 +93,34 @@ def main(argv: list[str] | None = None) -> int:
                 / args.maximum_arm_speed_rad_s,
                 maximum_joint_speed(bundle.park)
                 / args.maximum_arm_speed_rad_s,
+                *(
+                    [
+                        maximum_joint_speed(bundle.preposition)
+                        / args.maximum_arm_speed_rad_s
+                    ]
+                    if bundle.preposition is not None
+                    else []
+                ),
             )
         else:
             timescale = 1.0
         bundle = replace(
             bundle,
+            preposition=(
+                None
+                if bundle.preposition is None
+                else scale_trajectory_time(bundle.preposition, timescale)
+            ),
             main=scale_trajectory_time(bundle.main, timescale),
             park=scale_trajectory_time(bundle.park, timescale),
         )
+        preposition_summary = (
+            ""
+            if bundle.preposition is None
+            else f"preposition {bundle.preposition.duration_s:.3f} s, "
+        )
         print(
-            f"PASS: UR5e main {bundle.main.duration_s:.3f} s, "
+            f"PASS: UR5e {preposition_summary}main {bundle.main.duration_s:.3f} s, "
             f"park {bundle.park.duration_s:.3f} s"
         )
         print(f"Playback scale: {timescale:.6f}x duration")
@@ -128,8 +146,19 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         executor.validate_robot_ready()
-        executor.preposition(bundle.main.start)
-        samples = list(
+        executor.preposition(
+            bundle.main.start
+            if bundle.preposition is None
+            else bundle.preposition.start
+        )
+        samples = []
+        if bundle.preposition is not None:
+            samples.extend(
+                executor.execute(
+                    bundle.preposition, time.monotonic() + 0.02
+                )
+            )
+        samples.extend(
             executor.execute(bundle.main, time.monotonic() + 2.0)
         )
         samples.extend(

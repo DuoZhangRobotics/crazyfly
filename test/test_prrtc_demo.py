@@ -121,7 +121,13 @@ def test_maximum_arm_speed_resolves_shared_slowdown() -> None:
         "park",
         (JointSample(0.0, (1.5,) * 6), JointSample(1.0, (1.0,) * 6)),
     )
-    bundle = SimpleNamespace(main=main, park=park)
+    preposition = JointTrajectory(
+        "preposition",
+        (JointSample(0.0, (0.0,) * 6), JointSample(1.0, (2.0,) * 6)),
+    )
+    bundle = SimpleNamespace(
+        main=main, park=park, preposition=preposition
+    )
 
     timescale = prrtc_demo.resolve_playback_timescale(
         bundle,
@@ -129,4 +135,4 @@ def test_maximum_arm_speed_resolves_shared_slowdown() -> None:
         maximum_arm_speed_rad_s=0.5,
     )
 
-    assert timescale == pytest.approx(3.0)
+    assert timescale == pytest.approx(4.0)

@@ -104,6 +104,31 @@ def write_bundle(root: Path, *, dirty: bool = False) -> Path:
     return root
 
 
+def add_preposition(root: Path, *, schema_version: int = 1) -> Path:
+    preposition_path = root / "ur5e_preposition_trajectory.json"
+    payload = _joint_payload(
+        [(0.0, [0.2] * 6), (1.0, [0.1] * 6), (2.0, [0.0] * 6)]
+    )
+    payload["schema_version"] = schema_version
+    if schema_version == 3:
+        payload.pop("frame")
+    _write(preposition_path, payload)
+    validation_path = root / "validation.json"
+    validation = json.loads(validation_path.read_text())
+    validation["arm_preposition"] = {"collision_free": True}
+    _write(validation_path, validation)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["ur5e_preposition_trajectory.json"] = {
+        "sha256": hashlib.sha256(preposition_path.read_bytes()).hexdigest()
+    }
+    manifest["files"]["validation.json"]["sha256"] = hashlib.sha256(
+        validation_path.read_bytes()
+    ).hexdigest()
+    _write(manifest_path, manifest)
+    return root
+
+
 def test_bundle_loads_and_interpolates_exact_joint_path(tmp_path: Path) -> None:
     bundle = load_execution_bundle(write_bundle(tmp_path / "bundle"))
 
@@ -125,6 +150,46 @@ def test_bundle_applies_physical_first_joint_offset(tmp_path: Path) -> None:
     assert bundle.manifest["physical_first_joint_offset_rad"] == pytest.approx(
         pi / 2.0
     )
+
+
+@pytest.mark.parametrize("schema_version", [1, 3])
+def test_bundle_loads_validated_home_first_preposition(
+    tmp_path: Path, schema_version: int
+) -> None:
+    root = add_preposition(
+        write_bundle(tmp_path / "bundle"), schema_version=schema_version
+    )
+
+    bundle = load_execution_bundle(root, first_joint_offset_rad=pi / 2.0)
+
+    assert bundle.preposition is not None
+    assert bundle.preposition.start[0] == pytest.approx(0.2 + pi / 2.0)
+    assert bundle.preposition.end == pytest.approx(bundle.main.start)
+    assert bundle.preposition.start == pytest.approx(bundle.park.end)
+
+
+def test_preposition_requires_hash_and_endpoint_continuity(tmp_path: Path) -> None:
+    root = write_bundle(tmp_path / "missing_hash")
+    _write(
+        root / "ur5e_preposition_trajectory.json",
+        _joint_payload([(0.0, [0.2] * 6), (1.0, [0.0] * 6)]),
+    )
+    with pytest.raises(ConfigError, match="both ur5e_preposition"):
+        load_execution_bundle(root)
+
+    root = add_preposition(write_bundle(tmp_path / "bad_endpoint"))
+    preposition_path = root / "ur5e_preposition_trajectory.json"
+    payload = json.loads(preposition_path.read_text())
+    payload["samples"][-1]["positions_rad"] = [0.05] * 6
+    _write(preposition_path, payload)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["ur5e_preposition_trajectory.json"]["sha256"] = (
+        hashlib.sha256(preposition_path.read_bytes()).hexdigest()
+    )
+    _write(manifest_path, manifest)
+    with pytest.raises(ConfigError, match="end at the main-path start"):
+        load_execution_bundle(root)
 
 
 def test_joint_trajectory_timescale_reduces_speed() -> None:
