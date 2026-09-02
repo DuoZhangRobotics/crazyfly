@@ -129,6 +129,106 @@ def add_preposition(root: Path, *, schema_version: int = 1) -> Path:
     return root
 
 
+def write_continuous_bundle(root: Path) -> Path:
+    root = write_bundle(root)
+    main_path = root / "ur5e_trajectory.json"
+    main = _joint_payload(
+        [
+            (0.0, [0.0] * 6),
+            (2.0, [0.2] * 6),
+            (4.0, [0.4] * 6),
+        ]
+    )
+    main["schema_version"] = 77
+    _write(main_path, main)
+
+    park_path = root / "ur5e_park_trajectory.json"
+    park = _joint_payload([(4.0, [0.4] * 6), (6.0, [0.0] * 6)])
+    park["schema_version"] = 88
+    park.pop("frame")
+    _write(park_path, park)
+
+    complete_path = root / "ur5e_complete_trajectory.json"
+    complete = _joint_payload(
+        [
+            (0.0, [0.0] * 6),
+            (2.0, [0.2] * 6),
+            (4.0, [0.4] * 6),
+            (6.0, [0.0] * 6),
+        ]
+    )
+    complete["schema_version"] = 99
+    _write(complete_path, complete)
+
+    preposition_path = root / "ur5e_preposition_trajectory.json"
+    _write(
+        preposition_path,
+        {
+            "schema_version": 123,
+            "required": False,
+            "duration_s": 0.0,
+            "joint_names": list(JOINT_NAMES),
+            "samples": [{"time_s": 0.0, "positions_rad": [0.0] * 6}],
+        },
+    )
+
+    payload_path = root / "crazyfly_trajectory_payload.json"
+    payload = json.loads(payload_path.read_text())
+    payload["duration_s"] = 8.0
+    payload["trajectories"]["cf1"]["pieces"][0]["duration_s"] = 8.0
+    _write(payload_path, payload)
+
+    validation_path = root / "validation.json"
+    _write(
+        validation_path,
+        {
+            "offline_export_eligible": True,
+            "drone_brake_applied": False,
+            "complete_robot_mission": {"collision_free": True},
+            "return_home": {"collision_free": True},
+            "home_hold_through_drone_completion": {"collision_free": True},
+            "robot_boundaries": {"passed": True},
+            "arm_motion_limits": {"passed": True},
+        },
+    )
+
+    names = (
+        "crazyfly_trajectory_payload.json",
+        "ur5e_trajectory.json",
+        "ur5e_park_trajectory.json",
+        "ur5e_complete_trajectory.json",
+        "ur5e_preposition_trajectory.json",
+        "validation.json",
+    )
+    hashes = {
+        name: {"sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()}
+        for name in names
+    }
+    _write(
+        root / "manifest.json",
+        {
+            "schema_version": 456,
+            "bundle_id": "continuous-bundle",
+            "mission_mode": "continuous_ordered_stop",
+            "drone_brake_applied": False,
+            "goal_arrival_times_s": [4.0],
+            "artifact_hashes": hashes,
+            "frames": {
+                "payload_to_planner": {
+                    "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    "translation_m": [0.0, 0.0, 0.0],
+                }
+            },
+            "sources": {
+                "scene": {"snapshot_artifact": "planner_scene.json"},
+            },
+            "name_mapping": {"role": "cf1"},
+            "pRRTC": {"planner": {"commit": "abc"}},
+        },
+    )
+    return root
+
+
 def test_bundle_loads_and_interpolates_exact_joint_path(tmp_path: Path) -> None:
     bundle = load_execution_bundle(write_bundle(tmp_path / "bundle"))
 
@@ -363,3 +463,51 @@ def test_physical_metadata_requires_measured_calibration(tmp_path: Path) -> None
 
     with pytest.raises(ConfigError, match="name_mapping"):
         validate_physical_metadata(bundle)
+
+
+def test_continuous_bundle_uses_structure_not_schema_number(
+    tmp_path: Path,
+) -> None:
+    bundle = load_execution_bundle(
+        write_continuous_bundle(tmp_path / "continuous"),
+        accept_missing_physical_evidence=True,
+    )
+
+    assert bundle.return_during_drone_motion is True
+    assert bundle.preposition is None
+    assert bundle.main.duration_s == pytest.approx(4.0)
+    assert bundle.park.duration_s == pytest.approx(2.0)
+    assert bundle.park.start == pytest.approx(bundle.main.end)
+    assert bundle.park.end == pytest.approx(bundle.main.start)
+    assert bundle.manifest["source_schema_version"] == 456
+    assert bundle.manifest["name_mapping"] == {"cf1": "role"}
+
+
+def test_continuous_bundle_rejects_braked_drone_payload(tmp_path: Path) -> None:
+    root = write_continuous_bundle(tmp_path / "continuous")
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["drone_brake_applied"] = True
+    _write(manifest_path, manifest)
+
+    with pytest.raises(ConfigError, match="unbraked drone motion"):
+        load_execution_bundle(root, accept_missing_physical_evidence=True)
+
+
+def test_continuous_bundle_requires_authoritative_split_match(
+    tmp_path: Path,
+) -> None:
+    root = write_continuous_bundle(tmp_path / "continuous")
+    complete_path = root / "ur5e_complete_trajectory.json"
+    complete = json.loads(complete_path.read_text())
+    complete["samples"][-1]["positions_rad"][0] = 0.1
+    _write(complete_path, complete)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_hashes"]["ur5e_complete_trajectory.json"]["sha256"] = (
+        hashlib.sha256(complete_path.read_bytes()).hexdigest()
+    )
+    _write(manifest_path, manifest)
+
+    with pytest.raises(ConfigError, match="authoritative complete"):
+        load_execution_bundle(root, accept_missing_physical_evidence=True)

@@ -87,6 +87,7 @@ class ExecutionBundle:
     manifest: dict[str, object]
     robot_names: tuple[str, ...]
     preposition: JointTrajectory | None = None
+    return_during_drone_motion: bool = False
 
 
 def validate_physical_metadata(
@@ -156,17 +157,8 @@ def load_joint_trajectory(
 ) -> JointTrajectory:
     payload = _read_object(path)
     frame = payload.get("frame")
-    schema_version = payload.get("schema_version")
-    if (
-        schema_version != 1
-        and not (
-            (allow_schema_version_2 and schema_version == 2)
-            or (allow_schema_version_3 and schema_version == 3)
-        )
-    ) or (frame != "base" and not (allow_missing_frame and frame is None)):
-        raise ConfigError(
-            f"{name} must use an accepted schema version in base"
-        )
+    if frame != "base" and not (allow_missing_frame and frame is None):
+        raise ConfigError(f"{name} must use the physical base frame")
     if tuple(payload.get("joint_names", ())) != JOINT_NAMES:
         raise ConfigError(f"{name} has unexpected UR5e joint names")
     raw_samples = payload.get("samples")
@@ -286,7 +278,7 @@ def _normalize_v2_bundle(
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Translate pRRTC's version-2 names without weakening validation."""
     normalized = deepcopy(dict(manifest))
-    normalized["source_schema_version"] = 2
+    normalized["source_schema_version"] = manifest.get("schema_version")
     normalized["files"] = manifest.get("artifact_hashes")
     durations = manifest.get("durations_s")
     if isinstance(durations, Mapping):
@@ -341,6 +333,112 @@ def _normalize_v2_bundle(
     return normalized, normalized_validation
 
 
+def _normalize_continuous_bundle(
+    manifest: Mapping[str, object],
+    validation: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Normalize a structurally valid continuous arm-return bundle."""
+    normalized = deepcopy(dict(manifest))
+    normalized["source_schema_version"] = manifest.get("schema_version")
+    normalized["files"] = manifest.get("artifact_hashes")
+    normalized["execution_mode"] = "continuous_arm_return"
+
+    arrival_times = manifest.get("goal_arrival_times_s")
+    if (
+        isinstance(arrival_times, Sequence)
+        and not isinstance(arrival_times, (str, bytes))
+        and arrival_times
+    ):
+        normalized["T_goal_s"] = arrival_times[-1]
+
+    frames = manifest.get("frames")
+    if isinstance(frames, Mapping):
+        normalized["frame"] = {
+            "payload_to_planner": frames.get("payload_to_planner"),
+        }
+
+    sources = manifest.get("sources")
+    if isinstance(sources, Mapping):
+        scene = sources.get("scene")
+        if isinstance(scene, Mapping):
+            normalized["scene_path"] = scene.get("snapshot_artifact")
+        normalized["result_path"] = "planner_result.json"
+
+    raw_mapping = manifest.get("name_mapping")
+    if isinstance(raw_mapping, Mapping):
+        normalized["name_mapping"] = {
+            str(hardware_id): str(description)
+            for description, hardware_id in raw_mapping.items()
+        }
+
+    provenance = manifest.get("pRRTC")
+    if isinstance(provenance, Mapping):
+        planner = provenance.get("planner")
+        if isinstance(planner, Mapping):
+            normalized["pRRTC_source"] = provenance
+            normalized["pRRTC"] = dict(planner)
+
+    normalized_validation = deepcopy(dict(validation))
+    normalized_validation["arm_park"] = validation.get("return_home")
+    return normalized, normalized_validation
+
+
+def _inactive_preposition_state(
+    payload: Mapping[str, object],
+) -> tuple[float, ...] | None:
+    """Validate and return an optional zero-duration home-state record."""
+    if payload.get("required") is not False:
+        return None
+    raw_samples = payload.get("samples")
+    if not isinstance(raw_samples, list) or len(raw_samples) != 1:
+        raise ConfigError(
+            "inactive UR5e preposition must contain exactly one home sample"
+        )
+    if tuple(payload.get("joint_names", ())) != JOINT_NAMES:
+        raise ConfigError("inactive UR5e preposition has unexpected joint names")
+    sample = raw_samples[0]
+    if not isinstance(sample, Mapping):
+        raise ConfigError("inactive UR5e preposition sample must be an object")
+    if abs(_finite(sample.get("time_s"), "inactive preposition time")) > 1e-7:
+        raise ConfigError("inactive UR5e preposition must begin at zero")
+    positions = sample.get("positions_rad")
+    if not isinstance(positions, Sequence) or isinstance(positions, (str, bytes)):
+        raise ConfigError("inactive UR5e preposition requires six joints")
+    state = tuple(_finite(value, "inactive preposition joint") for value in positions)
+    if len(state) != 6:
+        raise ConfigError("inactive UR5e preposition requires six joints")
+    if abs(_finite(payload.get("duration_s"), "inactive preposition duration")) > 1e-7:
+        raise ConfigError("inactive UR5e preposition duration must be zero")
+    return state
+
+
+def _validate_complete_trajectory(
+    complete: JointTrajectory,
+    main: JointTrajectory,
+    park: JointTrajectory,
+) -> None:
+    expected = list(main.samples)
+    expected.extend(
+        JointSample(
+            time_s=main.duration_s + sample.time_s,
+            positions_rad=sample.positions_rad,
+        )
+        for sample in park.samples[1:]
+    )
+    if len(complete.samples) != len(expected):
+        raise ConfigError(
+            "authoritative complete UR5e trajectory does not match split paths"
+        )
+    for actual, wanted in zip(complete.samples, expected):
+        if abs(actual.time_s - wanted.time_s) > 1e-7 or max(
+            abs(first - second)
+            for first, second in zip(actual.positions_rad, wanted.positions_rad)
+        ) > 1e-7:
+            raise ConfigError(
+                "authoritative complete UR5e trajectory does not match split paths"
+            )
+
+
 def load_execution_bundle(
     root: str | Path,
     *,
@@ -356,33 +454,46 @@ def load_execution_bundle(
     directory = Path(root).expanduser().resolve()
     raw_manifest = _read_object(directory / "manifest.json")
     raw_validation = _read_object(directory / "validation.json")
-    schema_version = raw_manifest.get("schema_version")
-    if schema_version == 1:
-        manifest = raw_manifest
-        validation = raw_validation
-    elif schema_version == 2:
+
+    artifact_layout = isinstance(raw_manifest.get("artifact_hashes"), Mapping)
+    continuous_return = (
+        raw_manifest.get("mission_mode") == "continuous_ordered_stop"
+    )
+    if artifact_layout and continuous_return:
+        manifest, validation = _normalize_continuous_bundle(
+            raw_manifest, raw_validation
+        )
+    elif artifact_layout:
         manifest, validation = _normalize_v2_bundle(
             raw_manifest, raw_validation
         )
+    else:
+        manifest = raw_manifest
+        validation = raw_validation
+
+    if artifact_layout:
         scene_snapshot = directory / "planner_scene.json"
         result_snapshot = directory / "planner_result.json"
         if scene_snapshot.is_file():
             manifest["scene_path"] = str(scene_snapshot)
         if result_snapshot.is_file():
             manifest["result_path"] = str(result_snapshot)
-    else:
-        raise ConfigError("bundle manifest must use schema version 1 or 2")
+
     bundle_id = manifest.get("bundle_id")
     if not isinstance(bundle_id, str) or not bundle_id:
         raise ConfigError("bundle manifest requires bundle_id")
     file_records = manifest.get("files")
     if not isinstance(file_records, Mapping):
         raise ConfigError("bundle manifest requires file hashes")
-    for filename in REQUIRED_FILES:
+    required_files = list(REQUIRED_FILES)
+    if continuous_return:
+        required_files.append("ur5e_complete_trajectory.json")
+    for filename in required_files:
         record = file_records.get(filename)
         path = directory / filename
         if not isinstance(record, Mapping) or record.get("sha256") != _sha256(path):
             raise ConfigError(f"bundle hash mismatch: {filename}")
+
     preposition_path = directory / "ur5e_preposition_trajectory.json"
     preposition_record = file_records.get("ur5e_preposition_trajectory.json")
     if preposition_path.is_file() != isinstance(preposition_record, Mapping):
@@ -393,6 +504,7 @@ def load_execution_bundle(
         preposition_path
     ):
         raise ConfigError("bundle hash mismatch: ur5e_preposition_trajectory.json")
+
     if require_clean:
         state = manifest.get("pRRTC")
         if not isinstance(state, Mapping) or state.get("dirty") is not False:
@@ -400,16 +512,51 @@ def load_execution_bundle(
 
     if validation.get("offline_export_eligible") is not True:
         raise ConfigError("bundle is not offline_export_eligible")
-    post_goal = validation.get("post_goal")
-    if not isinstance(post_goal, Mapping):
-        raise ConfigError("bundle requires post_goal validation")
-    _require_collision_validation(post_goal, "goal_hold")
-    required_validations = ["arm_park"]
+    if continuous_return:
+        if (
+            manifest.get("drone_brake_applied") is not False
+            or validation.get("drone_brake_applied") is not False
+        ):
+            raise ConfigError(
+                "continuous arm-return bundle must preserve unbraked drone motion"
+            )
+        for key in (
+            "complete_robot_mission",
+            "return_home",
+            "home_hold_through_drone_completion",
+        ):
+            _require_collision_validation(validation, key)
+        boundaries = validation.get("robot_boundaries")
+        if not isinstance(boundaries, Mapping) or boundaries.get("passed") is not True:
+            raise ConfigError("continuous arm-return bundle requires valid boundaries")
+        motion_limits = validation.get("arm_motion_limits")
+        if (
+            not isinstance(motion_limits, Mapping)
+            or motion_limits.get("passed") is not True
+        ):
+            raise ConfigError("continuous arm-return bundle requires valid arm limits")
+        required_validations: list[str] = []
+    else:
+        post_goal = validation.get("post_goal")
+        if not isinstance(post_goal, Mapping):
+            raise ConfigError("bundle requires post_goal validation")
+        _require_collision_validation(post_goal, "goal_hold")
+        required_validations = ["arm_park"]
+
     if not accept_missing_physical_evidence:
         required_validations.extend(("drone_return", "abort_land_in_place"))
     for key in required_validations:
         _require_collision_validation(validation, key)
-    if preposition_path.is_file():
+
+    preposition_payload = (
+        _read_object(preposition_path) if preposition_path.is_file() else None
+    )
+    inactive_preposition = (
+        None
+        if preposition_payload is None
+        else _inactive_preposition_state(preposition_payload)
+    )
+    if preposition_path.is_file() and inactive_preposition is None:
         _require_collision_validation(validation, "arm_preposition")
 
     drone_payload = _read_object(directory / "crazyfly_trajectory_payload.json")
@@ -422,7 +569,7 @@ def load_execution_bundle(
 
     main = load_joint_trajectory(directory / "ur5e_trajectory.json", "ur5e main")
     preposition = None
-    if preposition_path.is_file():
+    if preposition_path.is_file() and inactive_preposition is None:
         preposition = load_joint_trajectory(
             preposition_path,
             "ur5e preposition",
@@ -432,10 +579,18 @@ def load_execution_bundle(
     park = load_joint_trajectory(
         directory / "ur5e_park_trajectory.json",
         "ur5e park",
-        allow_missing_frame=schema_version == 2,
-        normalize_time_origin=schema_version == 2,
-        allow_schema_version_2=schema_version == 2,
+        allow_missing_frame=artifact_layout,
+        normalize_time_origin=artifact_layout,
+        allow_schema_version_2=artifact_layout,
+        allow_schema_version_3=artifact_layout,
     )
+    if continuous_return:
+        complete = load_joint_trajectory(
+            directory / "ur5e_complete_trajectory.json",
+            "complete UR5e mission",
+        )
+        _validate_complete_trajectory(complete, main, park)
+
     validate_joint_limits(
         main,
         maximum_joint_speed_rad_s,
@@ -468,6 +623,18 @@ def load_execution_bundle(
             raise ConfigError(
                 "UR5e preposition must start at the park-path home"
             )
+    elif inactive_preposition is not None:
+        if max(
+            abs(first - second)
+            for first, second in zip(inactive_preposition, main.start)
+        ) > 1e-7 or max(
+            abs(first - second)
+            for first, second in zip(inactive_preposition, park.end)
+        ) > 1e-7:
+            raise ConfigError(
+                "inactive UR5e preposition must equal mission start and home"
+            )
+
     if max(abs(first - second) for first, second in zip(main.end, park.start)) > 1e-5:
         raise ConfigError("UR5e park path must begin at the main-path goal")
     if park.duration_s > maximum_park_duration_s + 1e-7:
@@ -475,6 +642,7 @@ def load_execution_bundle(
     manifest_goal = _finite(manifest.get("T_goal_s"), "manifest T_goal_s")
     if abs(main.duration_s - manifest_goal) > 1e-4:
         raise ConfigError("UR5e main duration does not match manifest T_goal_s")
+
     main = offset_first_joint(main, first_joint_offset_rad)
     park = offset_first_joint(park, first_joint_offset_rad)
     if preposition is not None:
@@ -490,4 +658,5 @@ def load_execution_bundle(
         manifest=manifest,
         robot_names=robot_names,
         preposition=preposition,
+        return_during_drone_motion=continuous_return,
     )

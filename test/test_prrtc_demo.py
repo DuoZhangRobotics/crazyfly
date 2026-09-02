@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from math import pi
 from pathlib import Path
@@ -136,3 +137,78 @@ def test_maximum_arm_speed_resolves_shared_slowdown() -> None:
     )
 
     assert timescale == pytest.approx(4.0)
+
+
+class _Flag:
+    def __init__(self, value: bool = False) -> None:
+        self.value = value
+
+    def is_set(self) -> bool:
+        return self.value
+
+
+class _SequenceExecutor:
+    def __init__(self) -> None:
+        self.operations = []
+
+    def execute(self, trajectory, start_at, *_args, **_kwargs):
+        self.operations.append(("execute", trajectory.name, start_at))
+        return ()
+
+    def hold_until(self, target, deadline, *_args, **_kwargs):
+        self.operations.append(("hold", tuple(target), deadline))
+        return True
+
+
+class _SequenceLog:
+    def __init__(self) -> None:
+        self.events = []
+
+    def event(self, name, data) -> None:
+        self.events.append((name, data))
+
+
+def test_continuous_return_runs_at_goal_time_before_drone_endpoint() -> None:
+    bundle = replace(_bundle(), return_during_drone_motion=True)
+    executor = _SequenceExecutor()
+    log = _SequenceLog()
+    mission = SimpleNamespace(endpoint=_Flag(), failed=_Flag())
+
+    prrtc_demo.complete_arm_mission_and_wait_for_drones(
+        executor=executor,
+        bundle=bundle,
+        mission_node=mission,
+        start_at=10.0,
+        playback_timescale=1.0,
+        record_sample=lambda _sample: None,
+        log=log,
+    )
+
+    assert executor.operations[0] == ("execute", "park", 14.0)
+    assert executor.operations[1][0:2] == ("hold", bundle.park.end)
+    assert [name for name, _data in log.events] == [
+        "arm_return_start",
+        "arm_home_reached",
+    ]
+
+
+def test_legacy_return_still_waits_for_endpoint(monkeypatch) -> None:
+    bundle = _bundle()
+    executor = _SequenceExecutor()
+    log = _SequenceLog()
+    mission = SimpleNamespace(endpoint=_Flag(), failed=_Flag())
+    monkeypatch.setattr(prrtc_demo.time, "monotonic", lambda: 20.0)
+
+    prrtc_demo.complete_arm_mission_and_wait_for_drones(
+        executor=executor,
+        bundle=bundle,
+        mission_node=mission,
+        start_at=10.0,
+        playback_timescale=1.0,
+        record_sample=lambda _sample: None,
+        log=log,
+    )
+
+    assert executor.operations[0][0:2] == ("hold", bundle.main.end)
+    assert executor.operations[1] == ("execute", "park", 20.02)
+    assert log.events == []

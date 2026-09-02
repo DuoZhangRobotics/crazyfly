@@ -606,7 +606,67 @@ def _print_bundle(bundle: ExecutionBundle, timescale: float = 1.0) -> None:
         print(f"  preposition:  {bundle.preposition.duration_s:.3f} s")
     print(f"  arm duration: {bundle.main.duration_s:.3f} s")
     print(f"  park duration:{bundle.park.duration_s:.3f} s")
+    print(
+        "  arm return:   "
+        + (
+            "during uninterrupted drone motion"
+            if bundle.return_during_drone_motion
+            else "after drone endpoint"
+        )
+    )
     print(f"  playback scale:{timescale:.6f}x duration")
+
+
+def complete_arm_mission_and_wait_for_drones(
+    *,
+    executor: TimedURExecutor,
+    bundle: ExecutionBundle,
+    mission_node: MissionNode,
+    start_at: float,
+    playback_timescale: float,
+    record_sample,
+    log: CombinedLog,
+) -> None:
+    """Return at the validated global time, then hold until drone completion."""
+    hold_target = bundle.main.end
+    if bundle.return_during_drone_motion:
+        return_start = start_at + bundle.main.duration_s
+        log.event(
+            "arm_return_start",
+            {
+                "scheduled_monotonic_s": return_start,
+                "duration_s": bundle.park.duration_s,
+            },
+        )
+        executor.execute(
+            bundle.park,
+            return_start,
+            record_sample,
+            stop_when=mission_node.failed.is_set,
+        )
+        hold_target = bundle.park.end
+        log.event("arm_home_reached", {"monotonic_s": time.monotonic()})
+
+    hold_deadline = (
+        start_at
+        + float(bundle.drone_payload["duration_s"]) * playback_timescale
+        + 3.0
+    )
+    if not executor.hold_until(
+        hold_target,
+        hold_deadline,
+        lambda: mission_node.endpoint.is_set() or mission_node.failed.is_set(),
+        on_sample=record_sample,
+    ) or mission_node.failed.is_set():
+        raise RuntimeError("Crazyflie endpoint acknowledgement timed out")
+
+    if not bundle.return_during_drone_motion:
+        executor.execute(
+            bundle.park,
+            time.monotonic() + 0.02,
+            record_sample,
+            stop_when=mission_node.failed.is_set,
+        )
 
 
 def run_combined(args, bundle: ExecutionBundle) -> Path:
@@ -623,6 +683,7 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         "accepted_missing_physical_evidence": True,
         "return_altitudes_m": [0.2, 0.4, 0.6, 0.8, 1.0],
         "home_first_preposition": bundle.preposition is not None,
+        "return_during_drone_motion": bundle.return_during_drone_motion,
         "preposition_duration_s": (
             None
             if bundle.preposition is None
@@ -742,23 +803,14 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         start_skew = abs(main_samples[0].monotonic_s - mission_node.drone_started_at)
         if start_skew > 0.05:
             raise RuntimeError(f"motion start skew exceeded 50 ms: {start_skew:.3f}")
-        hold_deadline = (
-            start_at
-            + float(bundle.drone_payload["duration_s"]) * args.playback_timescale
-            + 3.0
-        )
-        if not executor.hold_until(
-            bundle.main.end,
-            hold_deadline,
-            lambda: mission_node.endpoint.is_set() or mission_node.failed.is_set(),
-            on_sample=record_sample,
-        ) or mission_node.failed.is_set():
-            raise RuntimeError("Crazyflie endpoint acknowledgement timed out")
-        executor.execute(
-            bundle.park,
-            time.monotonic() + 0.02,
-            record_sample,
-            stop_when=mission_node.failed.is_set,
+        complete_arm_mission_and_wait_for_drones(
+            executor=executor,
+            bundle=bundle,
+            mission_node=mission_node,
+            start_at=start_at,
+            playback_timescale=args.playback_timescale,
+            record_sample=record_sample,
+            log=log,
         )
         if not mission_node.trigger(mission_node.return_client):
             raise RuntimeError("Crazyflie return release failed")
