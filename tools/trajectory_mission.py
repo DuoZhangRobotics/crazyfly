@@ -55,6 +55,19 @@ MOCK_SAFETY = ROOT / "config" / "mock_safety.yaml"
 RETURN_BASE_ALTITUDE_M = 0.20
 RETURN_ALTITUDE_SPACING_M = 0.20
 RETURN_SPEED_M_S = 0.20
+MINIMUM_TRAJECTORY_UPLOAD_TIMEOUT_S = 15.0
+TRAJECTORY_UPLOAD_TIMEOUT_PER_PIECE_S = 0.20
+
+
+def trajectory_upload_timeout_s(plan: TrajectoryPlan) -> float:
+    """Allow upload time proportional to the total raw polynomial count."""
+    total_piece_count = sum(
+        len(trajectory.pieces) for trajectory in plan.trajectories.values()
+    )
+    return max(
+        MINIMUM_TRAJECTORY_UPLOAD_TIMEOUT_S,
+        total_piece_count * TRAJECTORY_UPLOAD_TIMEOUT_PER_PIECE_S,
+    )
 
 
 def bounded_batch_id(mission_id: str, label: str, sequence: int) -> str:
@@ -874,7 +887,11 @@ def _run_mission(
                 plan, mission_id=mission_id, trajectory_id=trajectory_id
             ),
         )
-        wait_result("trajectory_upload", mission_id, 15.0)
+        wait_result(
+            "trajectory_upload",
+            mission_id,
+            trajectory_upload_timeout_s(plan),
+        )
         enable_when_ready()
         takeoff()
         flight_active = True

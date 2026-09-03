@@ -21,6 +21,9 @@ import trajectory_mission  # noqa: E402
 from crazyfly.config import ConfigError, load_fleet, load_safety  # noqa: E402
 from crazyfly.safety import continuous_minimum_separation  # noqa: E402
 from crazyfly.trajectory import (  # noqa: E402
+    PolynomialPiece,
+    RobotTrajectory,
+    TrajectoryPlan,
     evaluate_plan,
     load_trajectory,
     trajectory_payload,
@@ -92,6 +95,37 @@ def test_trajectory_mission_is_a_hardware_free_dry_run_by_default(capsys) -> Non
     output = capsys.readouterr().out
     assert "continuously valid" in output
     assert "DRY RUN" in output
+
+
+def test_trajectory_upload_timeout_scales_with_total_piece_count() -> None:
+    piece = PolynomialPiece(
+        duration_s=1.0,
+        poly_x=(0.0,) * 8,
+        poly_y=(0.0,) * 8,
+        poly_z=(0.0,) * 8,
+        poly_yaw=(0.0,) * 8,
+    )
+    small = TrajectoryPlan(
+        name="small",
+        frame="base",
+        trajectories={
+            f"cf{index}": RobotTrajectory((piece,) * 25)
+            for index in range(1, 4)
+        },
+        duration_s=25.0,
+    )
+    large = replace(
+        small,
+        name="large",
+        trajectories={
+            f"cf{index}": RobotTrajectory((piece,) * 30)
+            for index in range(1, 6)
+        },
+        duration_s=30.0,
+    )
+
+    assert trajectory_mission.trajectory_upload_timeout_s(small) == 15.0
+    assert trajectory_mission.trajectory_upload_timeout_s(large) == 30.0
 
 
 def test_legacy_trajectory_option_is_still_accepted(capsys) -> None:
