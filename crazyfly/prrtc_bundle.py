@@ -443,7 +443,6 @@ def load_execution_bundle(
     root: str | Path,
     *,
     require_clean: bool = False,
-    maximum_park_duration_s: float = 10.0,
     maximum_joint_speed_rad_s: float = MAXIMUM_JOINT_SPEED_RAD_S,
     maximum_joint_acceleration_rad_s2: float = (
         MAXIMUM_JOINT_ACCELERATION_RAD_S2
@@ -637,8 +636,14 @@ def load_execution_bundle(
 
     if max(abs(first - second) for first, second in zip(main.end, park.start)) > 1e-5:
         raise ConfigError("UR5e park path must begin at the main-path goal")
-    if park.duration_s > maximum_park_duration_s + 1e-7:
-        raise ConfigError("UR5e park path exceeds endpoint hold timeout")
+    if continuous_return:
+        drone_duration = _finite(
+            drone_payload.get("duration_s"), "Crazyflie payload duration"
+        )
+        if main.duration_s + park.duration_s > drone_duration + 1e-4:
+            raise ConfigError(
+                "arm must reach home before the drone trajectory ends"
+            )
     manifest_goal = _finite(manifest.get("T_goal_s"), "manifest T_goal_s")
     if abs(main.duration_s - manifest_goal) > 1e-4:
         raise ConfigError("UR5e main duration does not match manifest T_goal_s")

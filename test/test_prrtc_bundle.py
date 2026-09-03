@@ -511,3 +511,42 @@ def test_continuous_bundle_requires_authoritative_split_match(
 
     with pytest.raises(ConfigError, match="authoritative complete"):
         load_execution_bundle(root, accept_missing_physical_evidence=True)
+
+
+def test_return_home_has_no_fixed_duration_gate(tmp_path: Path) -> None:
+    root = write_bundle(tmp_path / "bundle")
+    park_path = root / "ur5e_park_trajectory.json"
+    _write(
+        park_path,
+        _joint_payload([(0.0, [0.4] * 6), (20.0, [0.2] * 6)]),
+    )
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["ur5e_park_trajectory.json"]["sha256"] = hashlib.sha256(
+        park_path.read_bytes()
+    ).hexdigest()
+    _write(manifest_path, manifest)
+
+    bundle = load_execution_bundle(root)
+
+    assert bundle.park.duration_s == pytest.approx(20.0)
+
+
+def test_continuous_return_must_finish_before_drone_endpoint(
+    tmp_path: Path,
+) -> None:
+    root = write_continuous_bundle(tmp_path / "continuous")
+    payload_path = root / "crazyfly_trajectory_payload.json"
+    payload = json.loads(payload_path.read_text())
+    payload["duration_s"] = 5.0
+    payload["trajectories"]["cf1"]["pieces"][0]["duration_s"] = 5.0
+    _write(payload_path, payload)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_hashes"]["crazyfly_trajectory_payload.json"]["sha256"] = (
+        hashlib.sha256(payload_path.read_bytes()).hexdigest()
+    )
+    _write(manifest_path, manifest)
+
+    with pytest.raises(ConfigError, match="arm must reach home"):
+        load_execution_bundle(root, accept_missing_physical_evidence=True)
