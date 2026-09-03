@@ -70,11 +70,25 @@ def staged_return_goals(
     current: dict[str, tuple[float, float, float]],
     anchors: dict[str, tuple[float, float, float]],
     safety: SafetyConfig,
+    *,
+    altitude_order_reference: (
+        dict[str, tuple[float, float, float]] | None
+    ) = None,
 ) -> tuple[tuple[str, dict[str, tuple[float, float, float]]], ...]:
-    """Build vertical-separation, horizontal-return, and descent stages."""
+    """Build return lanes while preserving a reference vertical ordering."""
     if set(current) != set(anchors) or not current:
         raise ConfigError("staged return requires matching current poses and anchors")
     names = tuple(sorted(current))
+    altitude_reference = (
+        current
+        if altitude_order_reference is None
+        else altitude_order_reference
+    )
+    if set(altitude_reference) != set(names):
+        raise ConfigError("altitude ordering requires all staged robots")
+    altitude_order = tuple(
+        sorted(names, key=lambda name: (altitude_reference[name][2], name))
+    )
     for first, second in combinations(names, 2):
         if math.dist(anchors[first], anchors[second]) < safety.minimum_separation_m:
             raise ConfigError(
@@ -97,7 +111,8 @@ def staged_return_goals(
         )
         upper = safety.geofence_max[2] - safety.soft_geofence_margin_m
     altitudes = {
-        name: lower + index * spacing for index, name in enumerate(names)
+        name: lower + index * spacing
+        for index, name in enumerate(altitude_order)
     }
     if max(altitudes.values()) > upper:
         raise ConfigError("not enough geofence height for separated return lanes")
@@ -147,7 +162,12 @@ def staged_preposition_goals(
     safety: SafetyConfig,
 ) -> tuple[tuple[str, dict[str, tuple[float, float, float]]], ...]:
     """Build separated altitude lanes ending at exact trajectory starts."""
-    return_stages = staged_return_goals(current, starts, safety)
+    return_stages = staged_return_goals(
+        current,
+        starts,
+        safety,
+        altitude_order_reference=starts,
+    )
     for name, point in starts.items():
         if safety.has_geofence:
             assert safety.geofence_min is not None

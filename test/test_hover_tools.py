@@ -738,3 +738,41 @@ def test_batch_id_is_bounded_and_distinguishes_long_stage_names() -> None:
     assert first == trajectory_mission.bounded_batch_id(
         mission_id, "preposition-separate-altitudes", 1
     )
+
+
+def test_staging_altitudes_preserve_vertical_order_for_close_columns() -> None:
+    safety = replace(
+        load_safety(ROOT / "config" / "mock_safety.yaml"),
+        minimum_separation_m=0.15,
+        soft_geofence_margin_m=0.01,
+        geofence_max=(2.0, 2.0, 1.5),
+    )
+    current = {
+        "cf2": (-0.250, -0.483, 0.30),
+        "cf4": (0.368, -1.225, 0.30),
+    }
+    starts = {
+        "cf2": (0.133573, -0.414592, 0.679119),
+        "cf4": (0.103736, -0.416013, 0.071176),
+    }
+
+    stages = trajectory_mission.staged_preposition_goals(
+        current, starts, safety
+    )
+
+    lane_goals = stages[0][1]
+    assert lane_goals["cf4"][2] == pytest.approx(0.2)
+    assert lane_goals["cf2"][2] == pytest.approx(0.4)
+    stage_start = current
+    for _label, goals in stages:
+        minimum, _pair, _fraction = continuous_minimum_separation(
+            stage_start, goals
+        )
+        assert minimum >= safety.minimum_separation_m
+        stage_start = goals
+
+    return_stages = trajectory_mission.staged_return_goals(
+        starts, current, safety
+    )
+    assert return_stages[0][1]["cf4"][2] == pytest.approx(0.2)
+    assert return_stages[0][1]["cf2"][2] == pytest.approx(0.4)
