@@ -238,16 +238,23 @@ def test_bundle_loads_and_interpolates_exact_joint_path(tmp_path: Path) -> None:
     assert bundle.park.duration_s == 2.0
 
 
-def test_bundle_applies_physical_first_joint_offset(tmp_path: Path) -> None:
+def test_bundle_applies_physical_installation_joint_offsets(tmp_path: Path) -> None:
     bundle = load_execution_bundle(
         write_bundle(tmp_path / "bundle"),
         first_joint_offset_rad=pi / 2.0,
+        last_joint_offset_rad=pi / 2.0,
     )
 
     assert bundle.main.start[0] == pytest.approx(pi / 2.0)
+    assert bundle.main.start[5] == pytest.approx(pi / 2.0)
     assert bundle.main.end[0] == pytest.approx(0.4 + pi / 2.0)
+    assert bundle.main.end[5] == pytest.approx(0.4 + pi / 2.0)
     assert bundle.park.start[0] == pytest.approx(0.4 + pi / 2.0)
+    assert bundle.park.start[5] == pytest.approx(0.4 + pi / 2.0)
     assert bundle.manifest["physical_first_joint_offset_rad"] == pytest.approx(
+        pi / 2.0
+    )
+    assert bundle.manifest["physical_last_joint_offset_rad"] == pytest.approx(
         pi / 2.0
     )
 
@@ -260,10 +267,15 @@ def test_bundle_loads_validated_home_first_preposition(
         write_bundle(tmp_path / "bundle"), schema_version=schema_version
     )
 
-    bundle = load_execution_bundle(root, first_joint_offset_rad=pi / 2.0)
+    bundle = load_execution_bundle(
+        root,
+        first_joint_offset_rad=pi / 2.0,
+        last_joint_offset_rad=pi / 2.0,
+    )
 
     assert bundle.preposition is not None
     assert bundle.preposition.start[0] == pytest.approx(0.2 + pi / 2.0)
+    assert bundle.preposition.start[5] == pytest.approx(0.2 + pi / 2.0)
     assert bundle.preposition.end == pytest.approx(bundle.main.start)
     assert bundle.preposition.start == pytest.approx(bundle.park.end)
 

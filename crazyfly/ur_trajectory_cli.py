@@ -44,6 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--robot-ip", default="172.16.90.197")
     parser.add_argument("--confirm-robot-ip")
     parser.add_argument("--first-joint-offset-rad", type=float, default=pi / 2.0)
+    parser.add_argument("--last-joint-offset-rad", type=float, default=pi / 2.0)
     parser.add_argument("--servo-lookahead-s", type=float, default=0.03)
     parser.add_argument("--servo-gain", type=float, default=1000.0)
     parser.add_argument("--maximum-joint-error-rad", type=float, default=0.20)
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             args.bundle,
             require_clean=False,
             first_joint_offset_rad=args.first_joint_offset_rad,
+            last_joint_offset_rad=args.last_joint_offset_rad,
             accept_missing_physical_evidence=True,
         )
         if args.playback_timescale is not None:

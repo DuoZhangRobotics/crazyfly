@@ -20,6 +20,7 @@ DEFAULT_HOME_CONFIG = Path(
 def load_physical_home(
     path: str | Path,
     first_joint_offset_rad: float = math.pi / 2.0,
+    last_joint_offset_rad: float = math.pi / 2.0,
 ) -> tuple[float, float, float, float, float, float]:
     source = Path(path).expanduser().resolve()
     data = json.loads(source.read_text(encoding="utf-8"))
@@ -37,6 +38,7 @@ def load_physical_home(
         raise ValueError("home configuration requires six finite joint positions")
     result = [float(value) for value in positions]
     result[0] += first_joint_offset_rad
+    result[5] += last_joint_offset_rad
     return tuple(result)  # type: ignore[return-value]
 
 
@@ -47,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-robot-ip")
     parser.add_argument("--home-config", default=str(DEFAULT_HOME_CONFIG))
     parser.add_argument("--first-joint-offset-rad", type=float, default=math.pi / 2.0)
+    parser.add_argument("--last-joint-offset-rad", type=float, default=math.pi / 2.0)
     parser.add_argument("--speed-rad-s", type=float, default=0.15)
     parser.add_argument("--acceleration-rad-s2", type=float, default=0.15)
     return parser
@@ -59,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for value, label in (
             (args.first_joint_offset_rad, "first-joint offset"),
+            (args.last_joint_offset_rad, "last-joint offset"),
             (args.speed_rad_s, "speed"),
             (args.acceleration_rad_s2, "acceleration"),
         ):
@@ -67,7 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.speed_rad_s <= 0 or args.acceleration_rad_s2 <= 0:
             raise ValueError("speed and acceleration must be positive")
         home = load_physical_home(
-            args.home_config, args.first_joint_offset_rad
+            args.home_config,
+            args.first_joint_offset_rad,
+            args.last_joint_offset_rad,
         )
         print(f"Robot: {args.robot_ip}")
         print(f"Physical home: {[round(value, 9) for value in home]}")

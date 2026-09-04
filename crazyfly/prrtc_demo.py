@@ -394,13 +394,15 @@ class MockControl:
 def planner_joint_positions(
     physical_joints_rad: tuple[float, ...],
     first_joint_offset_rad: float,
+    last_joint_offset_rad: float = 0.0,
 ) -> tuple[float, ...]:
-    """Undo the physical base-mount offset for planner-frame geometry."""
+    """Undo physical installation offsets for planner-frame geometry."""
     if len(physical_joints_rad) != 6:
         raise ConfigError("UR5e clearance model requires six joints")
     return (
         physical_joints_rad[0] - first_joint_offset_rad,
-        *physical_joints_rad[1:],
+        *physical_joints_rad[1:5],
+        physical_joints_rad[5] - last_joint_offset_rad,
     )
 
 
@@ -411,6 +413,7 @@ class RobotDistanceModel:
         *,
         required: bool,
         first_joint_offset_rad: float = 0.0,
+        last_joint_offset_rad: float = 0.0,
     ) -> None:
         self.client_id = None
         self.robot_id = None
@@ -419,6 +422,7 @@ class RobotDistanceModel:
         self.rotation = None
         self.translation = None
         self.first_joint_offset_rad = first_joint_offset_rad
+        self.last_joint_offset_rad = last_joint_offset_rad
         scene_path = bundle.manifest.get("scene_path")
         if not isinstance(scene_path, str):
             if required:
@@ -465,7 +469,9 @@ class RobotDistanceModel:
             return {name: 10.0 for name in positions}
         p = self.pybullet
         planner_joints = planner_joint_positions(
-            joints_rad, self.first_joint_offset_rad
+            joints_rad,
+            self.first_joint_offset_rad,
+            self.last_joint_offset_rad,
         )
         for joint, value in zip(self.joints, planner_joints):
             p.resetJointState(self.robot_id, joint, value)
@@ -555,6 +561,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--servo-gain", type=float, default=1000.0)
     parser.add_argument("--first-joint-offset-rad", type=float, default=pi / 2.0)
+    parser.add_argument("--last-joint-offset-rad", type=float, default=pi / 2.0)
     playback = parser.add_mutually_exclusive_group()
     playback.add_argument(
         "--playback-timescale",
@@ -679,6 +686,7 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
         "servo_gain": args.servo_gain,
         "servo_lookahead_s": URExecutionConfig().servo_lookahead_s,
         "first_joint_offset_rad": args.first_joint_offset_rad,
+        "last_joint_offset_rad": args.last_joint_offset_rad,
         "playback_timescale": args.playback_timescale,
         "accepted_missing_physical_evidence": True,
         "return_altitudes_m": [0.2, 0.4, 0.6, 0.8, 1.0],
@@ -708,6 +716,7 @@ def run_combined(args, bundle: ExecutionBundle) -> Path:
             bundle,
             required=not args.mock,
             first_joint_offset_rad=args.first_joint_offset_rad,
+            last_joint_offset_rad=args.last_joint_offset_rad,
         )
         safety = load_safety(DEFAULT_SAFETY)
         _, _, drone_plan = trajectory_from_payload(
@@ -861,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError("servo gain must be from 100 to 2000")
         if not math.isfinite(args.first_joint_offset_rad):
             raise ConfigError("first joint offset must be finite")
+        if not math.isfinite(args.last_joint_offset_rad):
+            raise ConfigError("last joint offset must be finite")
         bundle = load_execution_bundle(
             args.bundle,
             require_clean=False,
@@ -870,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             accept_missing_physical_evidence=True,
             first_joint_offset_rad=args.first_joint_offset_rad,
+            last_joint_offset_rad=args.last_joint_offset_rad,
         )
         args.playback_timescale = resolve_playback_timescale(
             bundle,

@@ -20,7 +20,9 @@ def test_load_physical_home_applies_installation_offset(tmp_path: Path) -> None:
 
     result = ur5e_go_home.load_physical_home(path)
 
-    assert result == pytest.approx((0.2 + pi / 2.0, -1.0, 1.2, -2.0, -1.5, 0.0))
+    assert result == pytest.approx(
+        (0.2 + pi / 2.0, -1.0, 1.2, -2.0, -1.5, pi / 2.0)
+    )
 
 
 def test_home_command_is_hardware_free_by_default(capsys) -> None:

@@ -1,4 +1,5 @@
 from dataclasses import replace
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -117,6 +118,8 @@ def test_arm_only_cli_uses_approved_test_settings() -> None:
     assert args.servo_lookahead_s == 0.03
     assert args.servo_gain == 1000.0
     assert args.maximum_joint_error_rad == 0.20
+    assert args.first_joint_offset_rad == pytest.approx(math.pi / 2.0)
+    assert args.last_joint_offset_rad == pytest.approx(math.pi / 2.0)
 
 
 def test_arm_only_cli_rejects_unsupported_lookahead(capsys) -> None:

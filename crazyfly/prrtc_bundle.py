@@ -216,21 +216,25 @@ def validate_joint_limits(
             raise ConfigError(f"{trajectory.name} exceeds joint acceleration limit")
 
 
-def offset_first_joint(
+def offset_installation_joints(
     trajectory: JointTrajectory,
-    offset_rad: float,
+    first_joint_offset_rad: float,
+    last_joint_offset_rad: float,
 ) -> JointTrajectory:
-    """Return a physical-installation trajectory with joint 1 offset."""
-    if not isfinite(offset_rad):
+    """Return a trajectory expressed in the physical UR5e joint convention."""
+    if not isfinite(first_joint_offset_rad):
         raise ConfigError("first joint offset must be finite")
+    if not isfinite(last_joint_offset_rad):
+        raise ConfigError("last joint offset must be finite")
     return JointTrajectory(
         name=trajectory.name,
         samples=tuple(
             JointSample(
                 time_s=sample.time_s,
                 positions_rad=(
-                    sample.positions_rad[0] + offset_rad,
-                    *sample.positions_rad[1:],
+                    sample.positions_rad[0] + first_joint_offset_rad,
+                    *sample.positions_rad[1:5],
+                    sample.positions_rad[5] + last_joint_offset_rad,
                 ),
             )
             for sample in trajectory.samples
@@ -449,6 +453,7 @@ def load_execution_bundle(
     ),
     accept_missing_physical_evidence: bool = False,
     first_joint_offset_rad: float = 0.0,
+    last_joint_offset_rad: float = 0.0,
 ) -> ExecutionBundle:
     directory = Path(root).expanduser().resolve()
     raw_manifest = _read_object(directory / "manifest.json")
@@ -648,11 +653,18 @@ def load_execution_bundle(
     if abs(main.duration_s - manifest_goal) > 1e-4:
         raise ConfigError("UR5e main duration does not match manifest T_goal_s")
 
-    main = offset_first_joint(main, first_joint_offset_rad)
-    park = offset_first_joint(park, first_joint_offset_rad)
+    main = offset_installation_joints(
+        main, first_joint_offset_rad, last_joint_offset_rad
+    )
+    park = offset_installation_joints(
+        park, first_joint_offset_rad, last_joint_offset_rad
+    )
     if preposition is not None:
-        preposition = offset_first_joint(preposition, first_joint_offset_rad)
+        preposition = offset_installation_joints(
+            preposition, first_joint_offset_rad, last_joint_offset_rad
+        )
     manifest["physical_first_joint_offset_rad"] = first_joint_offset_rad
+    manifest["physical_last_joint_offset_rad"] = last_joint_offset_rad
     return ExecutionBundle(
         root=directory,
         bundle_id=bundle_id,

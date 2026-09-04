@@ -103,12 +103,22 @@ def test_combined_defaults_use_approved_ur_limits_and_gain() -> None:
     assert args.maximum_joint_acceleration_rad_s2 == 40.0
     assert args.servo_gain == 1000.0
     assert args.first_joint_offset_rad == pi / 2.0
+    assert args.last_joint_offset_rad == pi / 2.0
 
 
-def test_clearance_model_undoes_physical_first_joint_offset() -> None:
-    physical = (0.2 + pi / 2.0, -1.0, 1.2, -2.0, -1.5, 0.3)
+def test_clearance_model_undoes_physical_installation_offsets() -> None:
+    physical = (
+        0.2 + pi / 2.0,
+        -1.0,
+        1.2,
+        -2.0,
+        -1.5,
+        0.3 + pi / 2.0,
+    )
 
-    planner = prrtc_demo.planner_joint_positions(physical, pi / 2.0)
+    planner = prrtc_demo.planner_joint_positions(
+        physical, pi / 2.0, pi / 2.0
+    )
 
     assert planner == pytest.approx((0.2, -1.0, 1.2, -2.0, -1.5, 0.3))
 
