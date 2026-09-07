@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "label": "user_reviewed_lab_home",
+  "joint_names": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "positions_rad": [
+    1.5708118677139282,
+    -2.2,
+    1.9,
+    -1.383,
+    -1.5700505415545862,
+    0.0
+  ]
+}

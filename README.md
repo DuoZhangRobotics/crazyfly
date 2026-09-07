@@ -240,9 +240,10 @@ the drone braking endpoint, and an 11.622 s arm park. Only timescales at least
 The UR trajectory validator uses the lab-wide limits `pi rad/s` and
 `40 rad/s^2`; the RTDE executor uses `servoJ` at 100 Hz with lookahead 0.03 s
 and gain 1000. The physical UR5e installation adds `+pi/2` to the first
-(`shoulder_pan_joint`) coordinate of every main and park sample; the clearance
-model removes the same offset before evaluating planner-frame geometry. These
-values can still be overridden explicitly on the command line. The combined
+(`shoulder_pan_joint`) and last (`wrist_3_joint`) coordinates of every main and
+park sample; the clearance model removes both offsets before evaluating
+planner-frame geometry. These values can still be overridden explicitly on
+the command line. The combined
 demo accepts missing offline return/abort corridors and
 measured arm/latency evidence by default, records that policy in the experiment
 manifest, and keeps all live flight and RTDE checks enabled.
@@ -253,11 +254,23 @@ holds the arm goal through drone completion, executes the validated arm park
 path, and only then releases drone return. Normal return assigns sorted drones
 to 0.2, 0.4, 0.6, 0.8, and 1.0 m lanes, moves them horizontally over their
 captured anchors, and lands directly with descent durations capped at 0.2 m/s.
-The route
-is rejected if the effective geofence cannot contain the lanes or the captured
-anchors violate live separation. Coordinated abort stops the arm and lands
-drones vertically in place. Arm-only validation/playback is available as
-`crazyfly_ur_trajectory`; both commands are dry-run by default.
+The route is rejected if the effective geofence cannot contain the lanes or
+the captured anchors violate live separation. Coordinated abort stops the arm
+and lands drones vertically in place. Arm-only validation/playback is available
+as `crazyfly_ur_trajectory`; both commands are dry-run by default.
+
+The tracked, user-reviewed demonstration home is stored in
+`config/ur5e_home_configuration.json`. From a cloned checkout, move the UR5e
+home with:
+
+```sh
+python tools/ur5e_go_home.py \
+  --execute --confirm-robot-ip 172.16.90.197
+```
+
+The script checks that the robot is in RUNNING/NORMAL mode, uses conservative
+`moveJ` speed and acceleration, and verifies the final joint error. It does not
+depend on the pRRTC checkout.
 
 Combined logs under `combined_experiments/` freeze the bundle and record
 repository/calibration hashes, scheduled and measured starts, UR joint/TCP

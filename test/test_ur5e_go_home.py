@@ -25,6 +25,24 @@ def test_load_physical_home_applies_installation_offset(tmp_path: Path) -> None:
     )
 
 
+def test_default_home_configuration_is_owned_by_crazyfly() -> None:
+    assert ur5e_go_home.DEFAULT_HOME_CONFIG == (
+        ROOT / "config" / "ur5e_home_configuration.json"
+    )
+    assert ur5e_go_home.load_physical_home(
+        ur5e_go_home.DEFAULT_HOME_CONFIG
+    ) == pytest.approx(
+        (
+            1.5708118677139282 + pi / 2.0,
+            -2.2,
+            1.9,
+            -1.383,
+            -1.5700505415545862,
+            pi / 2.0,
+        )
+    )
+
+
 def test_home_command_is_hardware_free_by_default(capsys) -> None:
     result = ur5e_go_home.main([])
 

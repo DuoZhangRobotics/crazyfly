@@ -11,10 +11,8 @@ import sys
 
 
 DEFAULT_ROBOT_IP = "172.16.90.197"
-DEFAULT_HOME_CONFIG = Path(
-    "/home/duo/pRRTC/dataset/ur5e_crazyflie_experiment/"
-    "hardware_inputs/ur5e_home_configuration.json"
-)
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_HOME_CONFIG = ROOT / "config" / "ur5e_home_configuration.json"
 
 
 def load_physical_home(
